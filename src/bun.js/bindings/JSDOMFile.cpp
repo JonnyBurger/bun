@@ -7,8 +7,8 @@
 
 using namespace JSC;
 
-extern "C" void* JSDOMFile__construct(JSC::JSGlobalObject*, JSC::CallFrame* callframe);
-extern "C" bool JSDOMFile__hasInstance(EncodedJSValue, JSC::JSGlobalObject*, EncodedJSValue);
+extern "C" SYSV_ABI void* JSDOMFile__construct(JSC::JSGlobalObject*, JSC::CallFrame* callframe);
+extern "C" SYSV_ABI bool JSDOMFile__hasInstance(EncodedJSValue, JSC::JSGlobalObject*, EncodedJSValue);
 
 // TODO: make this inehrit from JSBlob instead of InternalFunction
 // That will let us remove this hack for [Symbol.hasInstance] and fix the prototype chain.
@@ -42,7 +42,7 @@ public:
 
     static JSDOMFile* create(JSC::VM& vm, JSGlobalObject* globalObject)
     {
-        auto* zigGlobal = reinterpret_cast<Zig::GlobalObject*>(globalObject);
+        auto* zigGlobal = defaultGlobalObject(globalObject);
         auto structure = createStructure(vm, globalObject, zigGlobal->functionPrototype());
         auto* object = new (NotNull, JSC::allocateCell<JSDOMFile>(vm)) JSDOMFile(vm, structure);
         object->finishCreation(vm);
@@ -63,10 +63,10 @@ public:
         return JSDOMFile__hasInstance(JSValue::encode(object), globalObject, JSValue::encode(value));
     }
 
-    static JSC::EncodedJSValue construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
+    static JSC_HOST_CALL_ATTRIBUTES JSC::EncodedJSValue construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
     {
-        Zig::GlobalObject* globalObject = reinterpret_cast<Zig::GlobalObject*>(lexicalGlobalObject);
-        JSC::VM& vm = globalObject->vm();
+        auto* globalObject = defaultGlobalObject(lexicalGlobalObject);
+        auto& vm = JSC::getVM(globalObject);
         JSObject* newTarget = asObject(callFrame->newTarget());
         auto* constructor = globalObject->JSDOMFileConstructor();
         Structure* structure = globalObject->JSBlobStructure();
@@ -75,15 +75,15 @@ public:
 
             auto* functionGlobalObject = reinterpret_cast<Zig::GlobalObject*>(
                 // ShadowRealm functions belong to a different global object.
-                getFunctionRealm(globalObject, newTarget));
+                getFunctionRealm(lexicalGlobalObject, newTarget));
             RETURN_IF_EXCEPTION(scope, {});
             structure = InternalFunction::createSubclassStructure(
-                globalObject,
+                lexicalGlobalObject,
                 newTarget,
                 functionGlobalObject->JSBlobStructure());
         }
 
-        void* ptr = JSDOMFile__construct(globalObject, callFrame);
+        void* ptr = JSDOMFile__construct(lexicalGlobalObject, callFrame);
 
         if (UNLIKELY(!ptr)) {
             return JSValue::encode(JSC::jsUndefined());
@@ -93,7 +93,7 @@ public:
             WebCore::JSBlob::create(vm, globalObject, structure, ptr));
     }
 
-    static EncodedJSValue call(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
+    static JSC_HOST_CALL_ATTRIBUTES EncodedJSValue call(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
     {
         auto scope = DECLARE_THROW_SCOPE(lexicalGlobalObject->vm());
         throwTypeError(lexicalGlobalObject, scope, "Class constructor File cannot be invoked without 'new'"_s);

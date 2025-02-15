@@ -8,6 +8,12 @@
 #error "root.h must be included before any other WebCore or JavaScriptCore headers"
 #endif
 
+#if defined(WIN32) || defined(_WIN32)
+#define BUN_EXPORT __declspec(dllexport)
+#else
+#define BUN_EXPORT JS_EXPORT
+#endif
+
 /*
  * Copyright (C) 2006-2021 Apple Inc. All rights reserved.
  * Copyright (C) 2006 Samuel Weinig "sam.weinig@gmail.com"
@@ -53,8 +59,6 @@
 #include <wtf/FastMalloc.h>
 #endif
 
-#include <wtf/DisallowCType.h>
-
 /* Disabling warning C4206: nonstandard extension used: translation unit is empty.
    By design, we rely on #define flags to make some translation units empty.
    Make sure this warning does not turn into an error.
@@ -69,6 +73,7 @@
 
 #include <wtf/PlatformCallingConventions.h>
 #include <JavaScriptCore/JSCJSValue.h>
+#include <wtf/text/MakeString.h>
 #include <JavaScriptCore/JSCInlines.h>
 #include <wtf/IsoMalloc.h>
 #include <wtf/IsoMallocInlines.h>
@@ -77,5 +82,13 @@
 #define ENABLE_WEB_CRYPTO 1
 #define USE_OPENSSL 1
 #define HAVE_RSA_PSS 1
+
+#if OS(WINDOWS)
+#define BUN_DECLARE_HOST_FUNCTION(name) extern "C" __attribute__((visibility("default"))) JSC_DECLARE_HOST_FUNCTION(name)
+#define BUN_DEFINE_HOST_FUNCTION(name, args) extern "C" __attribute__((visibility("default"))) JSC_DEFINE_HOST_FUNCTION(name, args)
+#else
+#define BUN_DECLARE_HOST_FUNCTION(name) extern "C" JSC_DECLARE_HOST_FUNCTION(name)
+#define BUN_DEFINE_HOST_FUNCTION(name, args) extern "C" JSC_DEFINE_HOST_FUNCTION(name, args)
+#endif
 
 #endif

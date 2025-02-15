@@ -290,7 +290,7 @@ function formatBody(body?: string, isBase64Encoded?: boolean): string | null {
   if (!isBase64Encoded) {
     return body;
   }
-  return Buffer.from(body).toString("base64");
+  return Buffer.from(body, "base64").toString("utf8");
 }
 
 type HttpEventV1 = {
@@ -364,17 +364,15 @@ function formatHttpEventV2(event: HttpEventV2): Request {
       headers.append(name, value);
     }
   }
-  for (const [name, values] of Object.entries(event.queryStringParameters ?? {})) {
-    for (const value of values.split(",")) {
-      headers.append(name, value);
-    }
-  }
   for (const cookie of event.cookies ?? []) {
     headers.append("Set-Cookie", cookie);
   }
   const hostname = headers.get("Host") ?? request.domainName;
   const proto = headers.get("X-Forwarded-Proto") ?? "http";
   const url = new URL(request.http.path, `${proto}://${hostname}/`);
+  for (const [name, values] of Object.entries(event.queryStringParameters ?? {})) {
+    url.searchParams.append(name, values);
+  }
   return new Request(url.toString(), {
     method: request.http.method,
     headers,

@@ -33,15 +33,15 @@ JSValue BunInjectedScriptHost::subtype(JSGlobalObject* exec, JSValue value)
 static JSObject* constructInternalProperty(VM& vm, JSGlobalObject* exec, const String& name, JSValue value)
 {
     auto* object = constructEmptyObject(exec);
-    object->putDirect(vm, Identifier::fromString(vm, "name"_s), jsString(vm, name));
+    object->putDirect(vm, vm.propertyNames->name, jsString(vm, name));
     object->putDirect(vm, Identifier::fromString(vm, "value"_s), value);
     return object;
 }
 
-static JSObject* constructInternalProperty(VM& vm, JSGlobalObject* exec, Identifier name, JSValue value)
+static JSObject* constructInternalProperty(VM& vm, JSGlobalObject* exec, const Identifier& name, JSValue value)
 {
     auto* object = constructEmptyObject(exec);
-    object->putDirect(vm, Identifier::fromString(vm, "name"_s), JSC::identifierToJSValue(vm, name));
+    object->putDirect(vm, vm.propertyNames->name, JSC::identifierToJSValue(vm, name));
     object->putDirect(vm, Identifier::fromString(vm, "value"_s), value);
     return object;
 }
@@ -144,16 +144,16 @@ JSValue BunInjectedScriptHost::getInternalProperties(VM& vm, JSGlobalObject* exe
                 return array;
             }
 
-            if (auto* params = jsDynamicCast<JSURLSearchParams*>(value)) {
-                auto* array = constructEmptyArray(exec, nullptr);
-                constructDataProperties(vm, exec, array, WebCore::getInternalProperties(vm, exec, params));
-                RETURN_IF_EXCEPTION(scope, {});
-                return array;
-            }
-
             if (auto* formData = jsDynamicCast<JSDOMFormData*>(value)) {
                 auto* array = constructEmptyArray(exec, nullptr);
                 constructDataProperties(vm, exec, array, WebCore::getInternalProperties(vm, exec, formData));
+                RETURN_IF_EXCEPTION(scope, {});
+                return array;
+            }
+        } else if (type == JSAsJSONType) {
+            if (auto* params = jsDynamicCast<JSURLSearchParams*>(value)) {
+                auto* array = constructEmptyArray(exec, nullptr);
+                constructDataProperties(vm, exec, array, WebCore::getInternalProperties(vm, exec, params));
                 RETURN_IF_EXCEPTION(scope, {});
                 return array;
             }

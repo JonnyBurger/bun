@@ -1,14 +1,16 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { bunEnv, bunExe } from "../../../harness";
 import { Subprocess } from "bun";
-import { copyFileSync, rmSync } from "fs";
+import { install_test_helpers } from "bun:internal-for-testing";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { copyFileSync } from "fs";
+import { cp, rm } from "fs/promises";
 import { join } from "path";
 import { StringDecoder } from "string_decoder";
-import { cp, rm } from "fs/promises";
+import { bunEnv, bunExe, tmpdirSync, toMatchNodeModulesAt } from "../../../harness";
+const { parseLockfile } = install_test_helpers;
 
-import { tmpdir } from "node:os";
+expect.extend({ toMatchNodeModulesAt });
 
-let root = join(tmpdir(), "ssr" + Math.random().toString(36).slice(2, 4) + "-" + Date.now().toString(36).slice(2, 4));
+let root = tmpdirSync();
 
 beforeAll(async () => {
   await rm(root, { recursive: true, force: true });
@@ -94,7 +96,8 @@ beforeAll(async () => {
     stdin: "inherit",
   });
   if (!install.success) {
-    throw new Error("Failed to install dependencies");
+    const reason = install.signalCode || `code ${install.exitCode}`;
+    throw new Error(`Failed to install dependencies: ${reason}`);
   }
 
   try {
@@ -113,37 +116,45 @@ afterAll(() => {
   }
 });
 
-test("ssr works for 100-ish requests", async () => {
-  expect(dev_server).not.toBeUndefined();
-  expect(baseUrl).not.toBeUndefined();
+const timeout = Bun.version.includes("debug") ? 1_000_000 : 100_000;
+test(
+  "ssr works for 100-ish requests",
+  async () => {
+    expect(dev_server).not.toBeUndefined();
+    expect(baseUrl).not.toBeUndefined();
+    const lockfile = parseLockfile(root);
+    expect(lockfile).toMatchNodeModulesAt(root);
+    expect(lockfile).toMatchSnapshot();
 
-  const batchSize = 16;
-  const promises = [];
-  for (let j = 0; j < 100; j += batchSize) {
-    for (let i = j; i < j + batchSize; i++) {
-      promises.push(
-        (async () => {
-          const x = await fetch(`${baseUrl}/?i=${i}`, {
-            headers: {
-              "Cache-Control": "private, no-cache, no-store, must-revalidate",
-            },
-          });
-          expect(x.status).toBe(200);
-          const text = await x.text();
-          console.count("Completed request");
-          expect(text).toContain(`>${Bun.version}</code>`);
-        })(),
-      );
+    const batchSize = 16;
+    const promises = [];
+    for (let j = 0; j < 100; j += batchSize) {
+      for (let i = j; i < j + batchSize; i++) {
+        promises.push(
+          (async () => {
+            const x = await fetch(`${baseUrl}/?i=${i}`, {
+              headers: {
+                "Cache-Control": "private, no-cache, no-store, must-revalidate",
+              },
+            });
+            expect(x.status).toBe(200);
+            const text = await x.text();
+            console.count("Completed request");
+            expect(text).toContain(`>${Bun.version}</code>`);
+          })(),
+        );
+      }
+      await Promise.allSettled(promises);
     }
-    await Promise.allSettled(promises);
-  }
 
-  const x = await Promise.allSettled(promises);
-  const failing = x.filter(x => x.status === "rejected").map(x => x.reason!);
-  if (failing.length) {
-    throw new AggregateError(failing, failing.length + " requests failed", {});
-  }
-  for (const y of x) {
-    expect(y.status).toBe("fulfilled");
-  }
-}, 100000);
+    const x = await Promise.allSettled(promises);
+    const failing = x.filter(x => x.status === "rejected").map(x => x.reason!);
+    if (failing.length) {
+      throw new AggregateError(failing, failing.length + " requests failed", {});
+    }
+    for (const y of x) {
+      expect(y.status).toBe("fulfilled");
+    }
+  },
+  timeout,
+);

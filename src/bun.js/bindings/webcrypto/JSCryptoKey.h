@@ -44,6 +44,8 @@ public:
     static CryptoKey* toWrapped(JSC::VM&, JSC::JSValue);
     static void destroy(JSC::JSCell*);
 
+    static JSCryptoKey* fromJS(JSGlobalObject* globalObject, JSValue value);
+
     DECLARE_INFO;
 
     static JSC::Structure* createStructure(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSValue prototype)
@@ -64,6 +66,7 @@ public:
     DECLARE_VISIT_CHILDREN;
 
     static void analyzeHeap(JSCell*, JSC::HeapAnalyzer&);
+
 protected:
     JSCryptoKey(JSC::Structure*, JSDOMGlobalObject&, Ref<CryptoKey>&&);
 
@@ -72,7 +75,7 @@ protected:
 
 class JSCryptoKeyOwner final : public JSC::WeakHandleOwner {
 public:
-    bool isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown>, void* context, JSC::AbstractSlotVisitor&, const char**) final;
+    bool isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown>, void* context, JSC::AbstractSlotVisitor&, ASCIILiteral*) final;
     void finalize(JSC::Handle<JSC::Unknown>, void* context) final;
 };
 
@@ -100,8 +103,7 @@ String convertEnumerationToString(CryptoKey::Type);
 template<> JSC::JSString* convertEnumerationToJS(JSC::JSGlobalObject&, CryptoKey::Type);
 
 template<> std::optional<CryptoKey::Type> parseEnumeration<CryptoKey::Type>(JSC::JSGlobalObject&, JSC::JSValue);
-template<> const char* expectedEnumerationValues<CryptoKey::Type>();
-
+template<> ASCIILiteral expectedEnumerationValues<CryptoKey::Type>();
 
 } // namespace WebCore
 

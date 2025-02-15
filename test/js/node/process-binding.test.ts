@@ -17,10 +17,14 @@ describe("process.binding", () => {
     expect(uv).toHaveProperty("errname");
     expect(uv).toHaveProperty("UV_EACCES");
     expect(uv.errname(-4)).toBe("EINTR");
-    expect(uv.errname(5)).toBe("Unknown system error 5");
+    // force the number to be represented as a double
+    expect(uv.errname(Number("-5.9") + 1.9)).toBe("EINTR");
+    expect(uv.errname(-4)).toBe("EINTR");
+
+    expect(uv.errname(5)).toBe("Unknown system error: 5");
 
     const map = uv.getErrorMap();
     expect(map).toBeDefined();
-    expect(map.get(-56)).toEqual(["EISCONN", "socket is already connected"]);
+    expect(map.get(uv.UV_EISCONN)).toEqual(["EISCONN", "socket is already connected"]);
   });
 });

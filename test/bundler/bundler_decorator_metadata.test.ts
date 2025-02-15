@@ -1,6 +1,5 @@
-import assert from "assert";
-import { itBundled, testForFile } from "./expectBundled";
-var { describe, test, expect } = testForFile(import.meta.path);
+import { describe } from "bun:test";
+import { itBundled } from "./expectBundled";
 
 const reflectMetadata = `
 var Reflect2;

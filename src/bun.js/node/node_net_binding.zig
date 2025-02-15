@@ -11,9 +11,9 @@ const ZigString = JSC.ZigString;
 
 pub var autoSelectFamilyDefault: bool = true;
 
-pub fn getDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
+pub fn getDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) JSC.JSValue {
     return JSC.JSFunction.create(global, "getDefaultAutoSelectFamily", (struct {
-        fn getter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+        fn getter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) bun.JSError!JSC.JSValue {
             _ = globalThis;
             _ = callframe;
             return JSC.jsBoolean(autoSelectFamilyDefault);
@@ -21,18 +21,16 @@ pub fn getDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) callconv(.C) JSC.
     }).getter, 0, .{});
 }
 
-pub fn setDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
+pub fn setDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) JSC.JSValue {
     return JSC.JSFunction.create(global, "setDefaultAutoSelectFamily", (struct {
-        fn setter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
-            const arguments = callframe.arguments(1);
+        fn setter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) bun.JSError!JSC.JSValue {
+            const arguments = callframe.arguments_old(1);
             if (arguments.len < 1) {
-                globalThis.throw("missing argument", .{});
-                return .undefined;
+                return globalThis.throw("missing argument", .{});
             }
             const arg = arguments.slice()[0];
             if (!arg.isBoolean()) {
-                globalThis.throwInvalidArguments("autoSelectFamilyDefault", .{});
-                return .undefined;
+                return globalThis.throwInvalidArguments("autoSelectFamilyDefault", .{});
             }
             const value = arg.toBoolean();
             autoSelectFamilyDefault = value;
@@ -46,9 +44,9 @@ pub fn setDefaultAutoSelectFamily(global: *JSC.JSGlobalObject) callconv(.C) JSC.
 
 pub var autoSelectFamilyAttemptTimeoutDefault: u32 = 250;
 
-pub fn getDefaultAutoSelectFamilyAttemptTimeout(global: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
+pub fn getDefaultAutoSelectFamilyAttemptTimeout(global: *JSC.JSGlobalObject) JSC.JSValue {
     return JSC.JSFunction.create(global, "getDefaultAutoSelectFamilyAttemptTimeout", (struct {
-        fn getter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+        fn getter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) bun.JSError!JSC.JSValue {
             _ = globalThis;
             _ = callframe;
             return JSC.jsNumber(autoSelectFamilyAttemptTimeoutDefault);
@@ -56,18 +54,16 @@ pub fn getDefaultAutoSelectFamilyAttemptTimeout(global: *JSC.JSGlobalObject) cal
     }).getter, 0, .{});
 }
 
-pub fn setDefaultAutoSelectFamilyAttemptTimeout(global: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
+pub fn setDefaultAutoSelectFamilyAttemptTimeout(global: *JSC.JSGlobalObject) JSC.JSValue {
     return JSC.JSFunction.create(global, "setDefaultAutoSelectFamilyAttemptTimeout", (struct {
-        fn setter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
-            const arguments = callframe.arguments(1);
+        fn setter(globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) bun.JSError!JSC.JSValue {
+            const arguments = callframe.arguments_old(1);
             if (arguments.len < 1) {
-                globalThis.throw("missing argument", .{});
-                return .undefined;
+                return globalThis.throw("missing argument", .{});
             }
             const arg = arguments.slice()[0];
             if (!arg.isInt32AsAnyInt()) {
-                globalThis.throwInvalidArguments("autoSelectFamilyAttemptTimeoutDefault", .{});
-                return .undefined;
+                return globalThis.throwInvalidArguments("autoSelectFamilyAttemptTimeoutDefault", .{});
             }
             const value: u32 = @max(10, arg.coerceToInt32(globalThis));
             autoSelectFamilyAttemptTimeoutDefault = value;

@@ -24,7 +24,6 @@ const Api = @import("../api/schema.zig").Api;
 const resolve_path = @import("../resolver/resolve_path.zig");
 const configureTransformOptionsForBun = @import("../bun.js/config.zig").configureTransformOptionsForBun;
 const Command = @import("../cli.zig").Command;
-const bundler = bun.bundler;
 
 const fs = @import("../fs.zig");
 const URL = @import("../url.zig").URL;
@@ -36,7 +35,7 @@ const DotEnv = @import("../env_loader.zig");
 const NPMClient = @import("../which_npm_client.zig").NPMClient;
 const which = @import("../which.zig").which;
 const clap = bun.clap;
-const Lock = @import("../lock.zig").Lock;
+const Lock = bun.Mutex;
 const Headers = bun.http.Headers;
 const CopyFile = @import("../copy_file.zig");
 const ShellCompletions = @import("./shell_completions.zig");
@@ -47,7 +46,7 @@ pub const InstallCompletionsCommand = struct {
     const bunx_name = if (Environment.isDebug) "bunx-debug" else "bunx";
 
     fn installBunxSymlinkPosix(cwd: []const u8) !void {
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var buf: bun.PathBuffer = undefined;
 
         // don't install it if it's already there
         if (bun.which(&buf, bun.getenvZ("PATH") orelse cwd, cwd, bunx_name) != null)
@@ -55,13 +54,13 @@ pub const InstallCompletionsCommand = struct {
 
         // first try installing the symlink into the same directory as the bun executable
         const exe = try bun.selfExePath();
-        var target_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var target_buf: bun.PathBuffer = undefined;
         var target = std.fmt.bufPrint(&target_buf, "{s}/" ++ bunx_name, .{std.fs.path.dirname(exe).?}) catch unreachable;
-        std.os.symlink(exe, target) catch {
+        std.posix.symlink(exe, target) catch {
             outer: {
                 if (bun.getenvZ("BUN_INSTALL")) |install_dir| {
                     target = std.fmt.bufPrint(&target_buf, "{s}/bin/" ++ bunx_name, .{install_dir}) catch unreachable;
-                    std.os.symlink(exe, target) catch break :outer;
+                    std.posix.symlink(exe, target) catch break :outer;
                     return;
                 }
             }
@@ -70,7 +69,7 @@ pub const InstallCompletionsCommand = struct {
             outer: {
                 if (bun.getenvZ(bun.DotEnv.home_env)) |home_dir| {
                     target = std.fmt.bufPrint(&target_buf, "{s}/.bun/bin/" ++ bunx_name, .{home_dir}) catch unreachable;
-                    std.os.symlink(exe, target) catch break :outer;
+                    std.posix.symlink(exe, target) catch break :outer;
                     return;
                 }
             }
@@ -79,7 +78,7 @@ pub const InstallCompletionsCommand = struct {
             outer: {
                 if (bun.getenvZ(bun.DotEnv.home_env)) |home_dir| {
                     target = std.fmt.bufPrint(&target_buf, "{s}/.local/bin/" ++ bunx_name, .{home_dir}) catch unreachable;
-                    std.os.symlink(exe, target) catch break :outer;
+                    std.posix.symlink(exe, target) catch break :outer;
                     return;
                 }
             }
@@ -168,7 +167,7 @@ pub const InstallCompletionsCommand = struct {
         // Fail silently on auto-update.
         const fail_exit_code: u8 = if (bun.getenvZ("IS_BUN_AUTO_UPDATE") == null) 1 else 0;
 
-        var cwd_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var cwd_buf: bun.PathBuffer = undefined;
 
         var stdout = std.io.getStdOut();
 
@@ -304,7 +303,7 @@ pub const InstallCompletionsCommand = struct {
                 },
                 .zsh => {
                     if (bun.getenvZ("fpath")) |fpath| {
-                        var splitter = std.mem.split(u8, fpath, " ");
+                        var splitter = std.mem.splitScalar(u8, fpath, ' ');
 
                         while (splitter.next()) |dir| {
                             completions_dir = dir;
@@ -467,9 +466,9 @@ pub const InstallCompletionsCommand = struct {
 
         // Check if they need to load the zsh completions file into their .zshrc
         if (shell == .zsh) {
-            var completions_absolute_path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+            var completions_absolute_path_buf: bun.PathBuffer = undefined;
             const completions_path = bun.getFdPath(output_file.handle, &completions_absolute_path_buf) catch unreachable;
-            var zshrc_filepath: [bun.MAX_PATH_BYTES]u8 = undefined;
+            var zshrc_filepath: bun.PathBuffer = undefined;
             const needs_to_tell_them_to_add_completions_file = brk: {
                 var dot_zshrc: std.fs.File = zshrc: {
                     first: {

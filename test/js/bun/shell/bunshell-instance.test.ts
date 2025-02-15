@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import { $ } from "bun";
 
@@ -44,6 +44,10 @@ test("$.lines", async () => {
 
 test("$.arrayBuffer", async () => {
   expect(await $`echo hello`.arrayBuffer()).toEqual(new TextEncoder().encode("hello\n").buffer);
+});
+
+test("$.bytes", async () => {
+  expect(await $`echo hello`.bytes()).toEqual(new TextEncoder().encode("hello\n"));
 });
 
 test("$.blob", async () => {

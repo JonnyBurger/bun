@@ -104,7 +104,7 @@ using JSBroadcastChannelDOMConstructor = JSDOMConstructor<JSBroadcastChannel>;
 
 template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSBroadcastChannelDOMConstructor::construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
 {
-    VM& vm = lexicalGlobalObject->vm();
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* castedThis = jsCast<JSBroadcastChannelDOMConstructor*>(callFrame->jsCallee());
     ASSERT(castedThis);
@@ -112,10 +112,10 @@ template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSBroadcastChannelDOMCon
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     auto* context = castedThis->scriptExecutionContext();
     if (UNLIKELY(!context))
-        return throwConstructorScriptExecutionContextUnavailableError(*lexicalGlobalObject, throwScope, "BroadcastChannel");
+        return throwConstructorScriptExecutionContextUnavailableError(*lexicalGlobalObject, throwScope, "BroadcastChannel"_s);
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     auto object = BroadcastChannel::create(*context, WTFMove(name));
     if constexpr (IsExceptionOr<decltype(object)>)
         RETURN_IF_EXCEPTION(throwScope, {});
@@ -195,7 +195,7 @@ JSValue JSBroadcastChannel::getConstructor(VM& vm, const JSGlobalObject* globalO
 
 JSC_DEFINE_CUSTOM_GETTER(jsBroadcastChannelConstructor, (JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue, PropertyName))
 {
-    VM& vm = JSC::getVM(lexicalGlobalObject);
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* prototype = jsDynamicCast<JSBroadcastChannelPrototype*>(JSValue::decode(thisValue));
     if (UNLIKELY(!prototype))
@@ -281,7 +281,7 @@ static inline JSC::EncodedJSValue jsBroadcastChannelPrototypeFunction_postMessag
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto message = convert<IDLAny>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLUndefined>(*lexicalGlobalObject, throwScope, [&]() -> decltype(auto) { return impl.postMessage(*jsCast<JSDOMGlobalObject*>(lexicalGlobalObject), WTFMove(message)); })));
 }
 
@@ -351,17 +351,17 @@ void JSBroadcastChannel::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     auto* thisObject = jsCast<JSBroadcastChannel*>(cell);
     analyzer.setWrappedObjectForCell(cell, &thisObject->wrapped());
     if (thisObject->scriptExecutionContext())
-        analyzer.setLabelForCell(cell, "url "_s + thisObject->scriptExecutionContext()->url().string());
+        analyzer.setLabelForCell(cell, makeString("url "_s, thisObject->scriptExecutionContext()->url().string()));
     Base::analyzeHeap(cell, analyzer);
 }
 
-bool JSBroadcastChannelOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, const char** reason)
+bool JSBroadcastChannelOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, ASCIILiteral* reason)
 {
     auto* jsBroadcastChannel = jsCast<JSBroadcastChannel*>(handle.slot()->asCell());
     auto& wrapped = jsBroadcastChannel->wrapped();
-    if (/*!wrapped.isContextStopped() && */ wrapped.hasPendingActivity()) {
+    if (!wrapped.isContextStopped() && wrapped.hasPendingActivity()) {
         if (UNLIKELY(reason))
-            *reason = "ActiveDOMObject with pending activity";
+            *reason = "ActiveDOMObject with pending activity"_s;
         return true;
     }
     UNUSED_PARAM(visitor);
@@ -394,18 +394,18 @@ JSC::JSValue toJSNewlyCreated(JSC::JSGlobalObject*, JSDOMGlobalObject* globalObj
 
     if constexpr (std::is_polymorphic_v<BroadcastChannel>) {
 #if ENABLE(BINDING_INTEGRITY)
-        const void* actualVTablePointer = getVTablePointer(impl.ptr());
+        // const void* actualVTablePointer = getVTablePointer(impl.ptr());
 #if PLATFORM(WIN)
         void* expectedVTablePointer = __identifier("??_7BroadcastChannel@WebCore@@6B@");
 #else
-        void* expectedVTablePointer = &_ZTVN7WebCore16BroadcastChannelE[2];
+        // void* expectedVTablePointer = &_ZTVN7WebCore16BroadcastChannelE[2];
 #endif
 
         // If you hit this assertion you either have a use after free bug, or
         // BroadcastChannel has subclasses. If BroadcastChannel has subclasses that get passed
         // to toJS() we currently require BroadcastChannel you to opt out of binding hardening
         // by adding the SkipVTableValidation attribute to the interface IDL definition
-        RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+        // RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
 #endif
     }
     return createWrapper<BroadcastChannel>(globalObject, WTFMove(impl));

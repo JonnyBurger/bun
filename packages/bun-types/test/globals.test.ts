@@ -6,6 +6,7 @@ import { expectAssignable, expectType } from "./utilities.test";
 // FileBlob
 expectType<ReadableStream<Uint8Array>>(Bun.file("index.test-d.ts").stream());
 expectType<Promise<ArrayBuffer>>(Bun.file("index.test-d.ts").arrayBuffer());
+expectType<Promise<Uint8Array>>(Bun.file("index.test-d.ts").bytes());
 expectType<Promise<string>>(Bun.file("index.test-d.ts").text());
 
 expectType<number>(Bun.file("index.test-d.ts").size);
@@ -206,10 +207,6 @@ const writableStream = new WritableStream();
 {
   const a = new ResolveError();
   a.level;
-}
-{
-  const a = new EventSource("asdf");
-  a.CLOSED;
 }
 {
   const a = new AbortController();

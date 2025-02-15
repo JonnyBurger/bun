@@ -37,33 +37,23 @@
 //! The compiled binary is 13312 bytes and is `@embedFile`d into Bun itself.
 //! When this file is updated, the new binary should be compiled and BinLinkingShim.VersionFlag.current should be updated.
 //!
-//! Questions about this file should be directed at @paperdave.
+//! Questions about this file should be directed at @paperclover.
 const builtin = @import("builtin");
 const dbg = builtin.mode == .Debug;
 
 const std = @import("std");
 const w = std.os.windows;
 const assert = std.debug.assert;
-const fmt16 = std.unicode.fmtUtf16le;
+const fmt16 = std.unicode.fmtUtf16Le;
 
-const is_standalone = !@hasDecl(@import("root"), "JavaScriptCore");
+const is_standalone = @import("root") == @This();
 const bun = if (!is_standalone) @import("root").bun else @compileError("cannot use 'bun' in standalone build of bun_shim_impl");
 const bunDebugMessage = bun.Output.scoped(.bun_shim_impl, true);
 const callmod_inline = if (is_standalone) std.builtin.CallModifier.always_inline else bun.callmod_inline;
 
 const Flags = @import("./BinLinkingShim.zig").Flags;
 
-pub inline fn wliteral(comptime str: []const u8) []const u16 {
-    if (!@inComptime()) @compileError("strings.w() must be called in a comptime context");
-    comptime var output: [str.len]u16 = undefined;
-    for (str, 0..) |c, i| {
-        output[i] = c;
-    }
-    const Static = struct {
-        pub const literal: []const u16 = output[0..output.len];
-    };
-    return Static.literal;
-}
+const wliteral = std.unicode.utf8ToUtf16LeStringLiteral;
 
 /// A copy of all ntdll declarations this program uses
 const nt = struct {
@@ -135,7 +125,7 @@ fn debug(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn unicodeStringToU16(str: w.UNICODE_STRING) []u16 {
-    return str.Buffer[0 .. str.Length / 2];
+    return str.Buffer.?[0 .. str.Length / 2];
 }
 
 const FILE_GENERIC_READ = w.STANDARD_RIGHTS_READ | w.FILE_READ_DATA | w.FILE_READ_ATTRIBUTES | w.FILE_READ_EA | w.SYNCHRONIZE;
@@ -270,7 +260,7 @@ var failure_reason_data: [512]u8 = undefined;
 var failure_reason_argument: ?[]const u8 = null;
 
 noinline fn failAndExitWithReason(reason: FailReason) noreturn {
-    @setCold(true);
+    @branchHint(.cold);
 
     const console_handle = w.teb().ProcessEnvironmentBlock.ProcessParameters.hStdError;
     var mode: w.DWORD = 0;
@@ -320,7 +310,7 @@ pub const LauncherMode = enum {
     }
 
     noinline fn fail(comptime mode: LauncherMode, comptime reason: FailReason) mode.FailRetType() {
-        @setCold(true);
+        @branchHint(.cold);
         return switch (mode) {
             .launch => failAndExitWithReason(reason),
             .read_without_launch => ReadWithoutLaunchResult{ .err = reason },
@@ -338,11 +328,11 @@ fn launcher(comptime mode: LauncherMode, bun_ctx: anytype) mode.RetType() {
 
     // these are all different views of the same data
     const image_path_b_len = if (is_standalone) ImagePathName.Length else bun_ctx.base_path.len * 2;
-    const image_path_u16 = (if (is_standalone) ImagePathName.Buffer else bun_ctx.base_path.ptr)[0 .. image_path_b_len / 2];
-    const image_path_u8 = @as([*]u8, @ptrCast(if (is_standalone) ImagePathName.Buffer else bun_ctx.base_path.ptr))[0..image_path_b_len];
+    const image_path_u16 = (if (is_standalone) ImagePathName.Buffer.? else bun_ctx.base_path.ptr)[0 .. image_path_b_len / 2];
+    const image_path_u8 = @as([*]u8, @ptrCast(if (is_standalone) ImagePathName.Buffer.? else bun_ctx.base_path.ptr))[0..image_path_b_len];
 
     const cmd_line_b_len = CommandLine.Length;
-    const cmd_line_u16 = CommandLine.Buffer[0 .. cmd_line_b_len / 2];
+    const cmd_line_u16 = CommandLine.Buffer.?[0 .. cmd_line_b_len / 2];
     const cmd_line_u8 = @as([*]u8, @ptrCast(CommandLine.Buffer))[0..cmd_line_b_len];
 
     assert(@intFromPtr(cmd_line_u16.ptr) % 2 == 0); // alignment assumption
@@ -373,8 +363,8 @@ fn launcher(comptime mode: LauncherMode, bun_ctx: anytype) mode.RetType() {
     const suffix = comptime (if (is_standalone) wliteral("exe") else wliteral("bunx"));
     if (dbg) if (!std.mem.endsWith(u16, image_path_u16, suffix)) {
         std.debug.panic("assert failed: image path expected to end with {}, got {}", .{
-            std.unicode.fmtUtf16le(suffix),
-            std.unicode.fmtUtf16le(image_path_u16),
+            std.unicode.fmtUtf16Le(suffix),
+            std.unicode.fmtUtf16Le(image_path_u16),
         });
     };
     const image_path_to_copy_b_len = image_path_b_len - 2 * suffix.len;
@@ -497,7 +487,7 @@ fn launcher(comptime mode: LauncherMode, bun_ctx: anytype) mode.RetType() {
         assert(ptr[1] == '.');
 
         while (true) {
-            if (dbg) debug("1 - {}", .{std.unicode.fmtUtf16le(ptr[0..1])});
+            if (dbg) debug("1 - {}", .{std.unicode.fmtUtf16Le(ptr[0..1])});
             if (ptr[0] == '\\') {
                 left -= 1;
                 // ptr is of type [*]u16, which means -= operates on number of ITEMS, not BYTES
@@ -515,7 +505,7 @@ fn launcher(comptime mode: LauncherMode, bun_ctx: anytype) mode.RetType() {
         // inlined loop to do this again, because the completion case is different
         // using `inline for` caused comptime issues that made the code much harder to read
         while (true) {
-            if (dbg) debug("2 - {}", .{std.unicode.fmtUtf16le(ptr[0..1])});
+            if (dbg) debug("2 - {}", .{std.unicode.fmtUtf16Le(ptr[0..1])});
             if (ptr[0] == '\\') {
                 // ptr is at the position marked S, so move forward one *character*
                 break :brk ptr + 1;
@@ -795,8 +785,8 @@ fn launcher(comptime mode: LauncherMode, bun_ctx: anytype) mode.RetType() {
             null,
             null,
             1, // true
-            0,
-            null,
+            if (is_standalone) 0 else w.CREATE_UNICODE_ENVIRONMENT,
+            if (is_standalone) null else @constCast(bun_ctx.environment),
             null,
             &startup_info,
             &process,

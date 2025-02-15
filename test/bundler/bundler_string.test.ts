@@ -1,7 +1,5 @@
-import assert from "assert";
-import dedent from "dedent";
-import { itBundled, testForFile } from "./expectBundled";
-var { describe, test, expect } = testForFile(import.meta.path);
+import { describe } from "bun:test";
+import { dedent, itBundled } from "./expectBundled";
 
 interface TemplateStringTest {
   expr: string;
@@ -13,7 +11,7 @@ interface TemplateStringTest {
 const templateStringTests: Record<string, TemplateStringTest> = {
   // note for writing tests: .print is .trim()'ed due to how run.stdout works
   Empty: { expr: '""', captureRaw: '""' },
-  NullByte: { expr: '"hello\0"', captureRaw: '"hello\0"' },
+  NullByte: { expr: '"hello\0"', captureRaw: '"hello\\x00"' },
   EmptyTemplate: { expr: "``", captureRaw: '""' },
   ConstantTemplate: { expr: "`asdf`", captureRaw: '"asdf"' },
   AddConstant: { expr: "`${7 + 6}`", capture: true },
@@ -48,8 +46,8 @@ const templateStringTests: Record<string, TemplateStringTest> = {
   BigIntDivide: { expr: "`${6n / 2n}`", print: "3" },
   BigIntModulo: { expr: "`${6n % 4n}`", print: "2" },
   BigIntExponent: { expr: "`${2n ** 3n}`", print: "8" },
-  ArrowFunction: { expr: "`${() => 123}`", captureRaw: "`${(" }, // capture is weird in this scenario
-  Function: { expr: "`${function() { return 123; }}`", captureRaw: "`${function(" },
+  ArrowFunction: { expr: "`${() => 123}`", captureRaw: "`${()=>123}`" },
+  Function: { expr: "`${function() { return 123; }}`", captureRaw: "`${function(){return 123}}`" },
   Identifier: { expr: "`${ident}`", captureRaw: "`${ident}`" },
   IdentifierAdd: { expr: "`${ident + ident}`", captureRaw: "`${ident+ident}`" },
   IdentifierConstAdd: { expr: "`${2 + ident}`", captureRaw: "`${2+ident}`" },
@@ -63,15 +61,15 @@ const templateStringTests: Record<string, TemplateStringTest> = {
   },
   TernaryWithEscapeVariable: {
     expr: '`${"1"}\\${${VARIABLE ? "SOMETHING" : ""}`',
-    captureRaw: '`${"1"}\\${${VARIABLE?"SOMETHING":""}`',
+    captureRaw: '`1\\${${VARIABLE?"SOMETHING":""}`',
   },
   TernaryWithEscapeTrue: {
     expr: '`${"1"}\\${${true ? "SOMETHING" : ""}`',
-    captureRaw: '`${"1"}\\${${"SOMETHING"}`',
+    captureRaw: '"1${SOMETHING"',
   },
   TernaryWithEscapeFalse: {
     expr: '`${"1"}\\${${false ? "SOMETHING" : ""}`',
-    captureRaw: '`${"1"}\\${${""}`',
+    captureRaw: '"1${"',
   },
   Fold: { expr: "`a${'b'}c${'d'}e`", capture: true },
   FoldNested1: { expr: "`a${`b`}c${`${'d'}`}e`", capture: true },
@@ -82,6 +80,12 @@ const templateStringTests: Record<string, TemplateStringTest> = {
   FoldNested6: { expr: "`a\0${5}c\\${{$${`d`}e`", print: true },
   EscapedDollar: { expr: "`\\${'a'}`", captureRaw: "\"${'a'}\"" },
   EscapedDollar2: { expr: "`\\${'a'}\\${'b'}`", captureRaw: "\"${'a'}${'b'}\"" },
+  StringAddition: { expr: "`${1}\u2796` + 'rest'", print: true },
+  StringAddition2: { expr: "`\u2796${1}` + `a${Number(1)}b`", print: true },
+  StringAddition3: { expr: '`0${"\u2796"}` + `a${Number(1)}b`', print: true },
+  StringAddition4: { expr: "`${1}z` + `\u2796${Number(1)}rest`", print: true },
+  StringAddition5: { expr: "`\u2796${1}z` + `\u2796${Number(1)}rest`", print: true },
+  StringAddition6: { expr: "`${1}` + '\u2796rest'", print: true },
 };
 
 describe("bundler", () => {

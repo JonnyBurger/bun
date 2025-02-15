@@ -1,9 +1,8 @@
-import { test, describe } from "bun:test";
+import { describe, test } from "bun:test";
 import assert from "node:assert";
 import path from "node:path";
 import fixtures from "./common/fixtures.js";
-
-const isWindows = process.platform === "win32";
+import { isWindows } from "harness";
 
 describe("path.toNamespacedPath", () => {
   const emptyObj = {};
@@ -61,7 +60,9 @@ describe("path.toNamespacedPath", () => {
     assert.strictEqual(path.win32.toNamespacedPath("C:/foo"), "\\\\?\\C:\\foo");
     assert.strictEqual(path.win32.toNamespacedPath("\\\\foo\\bar"), "\\\\?\\UNC\\foo\\bar\\");
     assert.strictEqual(path.win32.toNamespacedPath("//foo//bar"), "\\\\?\\UNC\\foo\\bar\\");
-    assert.strictEqual(path.win32.toNamespacedPath("\\\\?\\foo"), "\\\\?\\foo");
+    assert.strictEqual(path.win32.toNamespacedPath("\\\\?\\foo\\"), "\\\\?\\foo\\");
+    assert.strictEqual(path.win32.toNamespacedPath("\\\\?\\foo"), "\\\\?\\foo\\");
+    assert.strictEqual(path.win32.toNamespacedPath("\\\\?\\c:\\Windows/System"), "\\\\?\\c:\\Windows\\System");
     assert.strictEqual(path.win32.toNamespacedPath(null), null);
     assert.strictEqual(path.win32.toNamespacedPath(true), true);
     assert.strictEqual(path.win32.toNamespacedPath(1), 1);

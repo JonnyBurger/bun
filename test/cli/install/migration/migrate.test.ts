@@ -1,27 +1,14 @@
+import { beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import fs from "fs";
-import { test, expect, beforeAll, afterAll } from "bun:test";
-import { bunEnv, bunExe } from "harness";
-import { join, sep } from "path";
-import { mkdtempSync } from "js/node/fs/export-star-from";
-import { tmpdir } from "os";
-
-const ROOT_TEMP_DIR = join(tmpdir(), "migrate", sep);
+import { bunEnv, bunExe, tmpdirSync } from "harness";
+import { join } from "path";
 
 beforeAll(() => {
-  // if the test was stopped early
-  fs.rmSync(ROOT_TEMP_DIR, { recursive: true, force: true });
-  fs.mkdirSync(ROOT_TEMP_DIR);
-});
-
-afterAll(() => {
-  fs.rmSync(ROOT_TEMP_DIR, {
-    recursive: true,
-    force: true,
-  });
+  setDefaultTimeout(1000 * 60 * 5);
 });
 
 function testMigration(lockfile: string) {
-  const testDir = mkdtempSync(ROOT_TEMP_DIR);
+  const testDir = tmpdirSync();
 
   fs.writeFileSync(
     join(testDir, "package.json"),
@@ -58,7 +45,7 @@ test("migrate from npm lockfile v2 during `bun add`", () => {
 
 // Currently this upgrades svelte :(
 test.todo("migrate workspace from npm during `bun add`", async () => {
-  const testDir = mkdtempSync(ROOT_TEMP_DIR);
+  const testDir = tmpdirSync();
 
   fs.cpSync(join(import.meta.dir, "add-while-migrate-workspace"), testDir, { recursive: true });
 
@@ -76,8 +63,41 @@ test.todo("migrate workspace from npm during `bun add`", async () => {
   expect(svelte_version).toBe("3.0.0");
 });
 
+test("migrate package with dependency on root package", async () => {
+  const testDir = tmpdirSync();
+
+  fs.cpSync(join(import.meta.dir, "migrate-package-with-dependency-on-root"), testDir, { recursive: true });
+
+  const { stdout } = Bun.spawnSync([bunExe(), "install"], {
+    env: bunEnv,
+    cwd: join(testDir),
+    stdout: "pipe",
+  });
+
+  expect(stdout.toString()).toContain("success!");
+  expect(fs.existsSync(join(testDir, "node_modules", "test-pkg", "package.json"))).toBeTrue();
+});
+
+test("migrate package with npm dependency that resolves to a git package", async () => {
+  const testDir = tmpdirSync();
+
+  fs.cpSync(join(import.meta.dir, "npm-version-to-git-resolution"), testDir, { recursive: true });
+
+  const { exitCode } = Bun.spawnSync([bunExe(), "install"], {
+    env: bunEnv,
+    cwd: testDir,
+    stdout: "pipe",
+  });
+
+  expect(exitCode).toBe(0);
+  expect(await Bun.file(join(testDir, "node_modules", "jquery", "package.json")).json()).toHaveProperty(
+    "name",
+    "install-test",
+  );
+});
+
 test("migrate from npm lockfile that is missing `resolved` properties", async () => {
-  const testDir = mkdtempSync(ROOT_TEMP_DIR);
+  const testDir = tmpdirSync();
 
   fs.cpSync(join(import.meta.dir, "missing-resolved-properties"), testDir, { recursive: true });
 
@@ -88,5 +108,26 @@ test("migrate from npm lockfile that is missing `resolved` properties", async ()
 
   expect(fs.existsSync(join(testDir, "node_modules/lodash"))).toBeTrue();
   expect(await Bun.file(join(testDir, "node_modules/lodash/package.json")).json()).toHaveProperty("version", "4.17.21");
+  expect(exitCode).toBe(0);
+});
+
+test("npm lockfile with relative workspaces", async () => {
+  const testDir = tmpdirSync();
+  console.log(join(import.meta.dir, "lockfile-with-workspaces"), testDir, { recursive: true });
+  fs.cpSync(join(import.meta.dir, "lockfile-with-workspaces"), testDir, { recursive: true });
+  const { exitCode, stderr } = Bun.spawnSync([bunExe(), "install"], {
+    env: bunEnv,
+    cwd: testDir,
+  });
+  const err = stderr.toString();
+  expect(err).toContain("migrated lockfile from package-lock.json");
+
+  expect(err).not.toContain("InvalidNPMLockfile");
+  for (let i = 0; i < 4; i++) {
+    expect(await Bun.file(join(testDir, "node_modules", "pkg" + i, "package.json")).json()).toEqual({
+      "name": "pkg" + i,
+    });
+  }
+
   expect(exitCode).toBe(0);
 });

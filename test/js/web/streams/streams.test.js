@@ -1,11 +1,16 @@
-import { file, readableStreamToArrayBuffer, readableStreamToArray, readableStreamToText, ArrayBufferSink } from "bun";
-import { expect, it, beforeEach, afterEach, describe, test } from "bun:test";
+import {
+  ArrayBufferSink,
+  file,
+  readableStreamToArray,
+  readableStreamToArrayBuffer,
+  readableStreamToBytes,
+  readableStreamToText,
+} from "bun";
+import { describe, expect, it, test } from "bun:test";
+import { tmpdirSync, isWindows, isMacOS, bunEnv } from "harness";
 import { mkfifo } from "mkfifo";
-import { realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { createReadStream, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "os";
-
-const isWindows = process.platform === "win32";
 
 it("TransformStream", async () => {
   // https://developer.mozilla.org/en-US/docs/Web/API/TransformStream
@@ -420,13 +425,14 @@ it("ReadableStream.prototype.values", async () => {
   expect(chunks.join("")).toBe("helloworld");
 });
 
-it.skipIf(isWindows)("Bun.file() read text from pipe", async () => {
+it.todoIf(isWindows || isMacOS)("Bun.file() read text from pipe", async () => {
+  const fifoPath = join(tmpdirSync(), "bun-streams-test-fifo");
   try {
-    unlinkSync("/tmp/fifo");
-  } catch (e) {}
+    unlinkSync(fifoPath);
+  } catch {}
 
   console.log("here");
-  mkfifo("/tmp/fifo", 0o666);
+  mkfifo(fifoPath, 0o666);
 
   // 65k so its less than the max on linux
   const large = "HELLO!".repeat((((1024 * 65) / "HELLO!".length) | 0) + 1);
@@ -434,11 +440,12 @@ it.skipIf(isWindows)("Bun.file() read text from pipe", async () => {
   const chunks = [];
 
   const proc = Bun.spawn({
-    cmd: ["bash", join(import.meta.dir + "/", "bun-streams-test-fifo.sh"), "/tmp/fifo"],
+    cmd: ["bash", join(import.meta.dir + "/", "bun-streams-test-fifo.sh"), fifoPath],
     stderr: "inherit",
     stdout: "pipe",
     stdin: null,
     env: {
+      ...bunEnv,
       FIFO_TEST: large,
     },
   });
@@ -447,7 +454,7 @@ it.skipIf(isWindows)("Bun.file() read text from pipe", async () => {
 
   const prom = (async function () {
     while (chunks.length === 0) {
-      var out = Bun.file("/tmp/fifo").stream();
+      var out = Bun.file(fifoPath).stream();
       for await (const chunk of out) {
         chunks.push(chunk);
       }
@@ -622,6 +629,42 @@ it("readableStreamToArrayBuffer (default)", async () => {
   expect(new TextDecoder().decode(new Uint8Array(buffer))).toBe("abdefgh");
 });
 
+it("readableStreamToBytes (bytes)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+    type: "bytes",
+  });
+  const buffer = await readableStreamToBytes(stream);
+  expect(new TextDecoder().decode(new Uint8Array(buffer))).toBe("abdefgh");
+});
+
+it("readableStreamToBytes (default)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+  });
+
+  const buffer = await readableStreamToBytes(stream);
+  expect(new TextDecoder().decode(new Uint8Array(buffer))).toBe("abdefgh");
+});
+
 it("ReadableStream for Blob", async () => {
   var blob = new Blob(["abdefgh", "ijklmnop"]);
   expect(await blob.text()).toBe("abdefghijklmnop");
@@ -694,8 +737,9 @@ it("ReadableStream for empty blob closes immediately", async () => {
 });
 
 it("ReadableStream for empty file closes immediately", async () => {
-  writeFileSync("/tmp/bun-empty-file-123456", "");
-  var blob = file("/tmp/bun-empty-file-123456");
+  const emptyFile = join(tmpdirSync(), "empty");
+  writeFileSync(emptyFile, "");
+  var blob = file(emptyFile);
   var stream;
   try {
     stream = blob.stream();
@@ -713,6 +757,55 @@ it("ReadableStream for empty file closes immediately", async () => {
   expect(chunks.length).toBe(0);
 });
 
+it("ReadableStream errors the stream on pull rejection", async () => {
+  let stream = new ReadableStream({
+    pull(controller) {
+      return Promise.reject("pull rejected");
+    },
+  });
+
+  let reader = stream.getReader();
+  let closed = reader.closed.catch(err => `closed: ${err}`);
+  let read = reader.read().catch(err => `read: ${err}`);
+  expect(await Promise.race([closed, read])).toBe("closed: pull rejected");
+  expect(await read).toBe("read: pull rejected");
+});
+
+it("ReadableStream rejects pending reads when the lock is released", async () => {
+  let { resolve, promise } = Promise.withResolvers();
+  let stream = new ReadableStream({
+    async pull(controller) {
+      controller.enqueue("123");
+      await promise;
+      controller.enqueue("456");
+      controller.close();
+    },
+  });
+
+  let reader = stream.getReader();
+  expect((await reader.read()).value).toBe("123");
+
+  let read = reader.read();
+  reader.releaseLock();
+  expect(read).rejects.toThrow(
+    expect.objectContaining({
+      name: "AbortError",
+      code: "ERR_STREAM_RELEASE_LOCK",
+    }),
+  );
+  expect(reader.closed).rejects.toThrow(
+    expect.objectContaining({
+      name: "AbortError",
+      code: "ERR_STREAM_RELEASE_LOCK",
+    }),
+  );
+
+  resolve();
+
+  reader = stream.getReader();
+  expect((await reader.read()).value).toBe("456");
+});
+
 it("new Response(stream).arrayBuffer() (bytes)", async () => {
   var queue = [Buffer.from("abdefgh")];
   var stream = new ReadableStream({
@@ -728,7 +821,7 @@ it("new Response(stream).arrayBuffer() (bytes)", async () => {
     type: "bytes",
   });
   const buffer = await new Response(stream).arrayBuffer();
-  expect(new TextDecoder().decode(new Uint8Array(buffer))).toBe("abdefgh");
+  expect(new TextDecoder().decode(buffer)).toBe("abdefgh");
 });
 
 it("new Response(stream).arrayBuffer() (default)", async () => {
@@ -745,7 +838,90 @@ it("new Response(stream).arrayBuffer() (default)", async () => {
     cancel() {},
   });
   const buffer = await new Response(stream).arrayBuffer();
+  expect(new TextDecoder().decode(buffer)).toBe("abdefgh");
+});
+
+it("new Response(stream).arrayBuffer() (direct)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      controller.write(chunk);
+      controller.close();
+    },
+    cancel() {},
+    type: "direct",
+  });
+  const buffer = await new Response(stream).arrayBuffer();
   expect(new TextDecoder().decode(new Uint8Array(buffer))).toBe("abdefgh");
+});
+
+it("new Response(stream).bytes() (bytes)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+    type: "bytes",
+  });
+  const buffer = await new Response(stream).bytes();
+  expect(new TextDecoder().decode(buffer)).toBe("abdefgh");
+});
+
+it("new Response(stream).bytes() (default)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+  });
+  const buffer = await new Response(stream).bytes();
+  expect(new TextDecoder().decode(buffer)).toBe("abdefgh");
+});
+
+it("new Response(stream).bytes() (direct)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      controller.write(chunk);
+      controller.close();
+    },
+    cancel() {},
+    type: "direct",
+  });
+  const buffer = await new Response(stream).bytes();
+  expect(new TextDecoder().decode(buffer)).toBe("abdefgh");
+});
+
+it("new Response(stream).text() (bytes)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+    type: "bytes",
+  });
+  const text = await new Response(stream).text();
+  expect(text).toBe("abdefgh");
 });
 
 it("new Response(stream).text() (default)", async () => {
@@ -765,6 +941,39 @@ it("new Response(stream).text() (default)", async () => {
   expect(text).toBe("abdefgh");
 });
 
+it("new Response(stream).text() (direct)", async () => {
+  var queue = [Buffer.from("abdefgh")];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      controller.write(chunk);
+      controller.close();
+    },
+    cancel() {},
+    type: "direct",
+  });
+  const text = await new Response(stream).text();
+  expect(text).toBe("abdefgh");
+});
+
+it("new Response(stream).json() (bytes)", async () => {
+  var queue = [Buffer.from(JSON.stringify({ hello: true }))];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+    type: "bytes",
+  });
+  const json = await new Response(stream).json();
+  expect(json.hello).toBe(true);
+});
+
 it("new Response(stream).json() (default)", async () => {
   var queue = [Buffer.from(JSON.stringify({ hello: true }))];
   var stream = new ReadableStream({
@@ -782,6 +991,40 @@ it("new Response(stream).json() (default)", async () => {
   expect(json.hello).toBe(true);
 });
 
+it("new Response(stream).json() (direct)", async () => {
+  var queue = [Buffer.from(JSON.stringify({ hello: true }))];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      controller.write(chunk);
+      controller.close();
+    },
+    cancel() {},
+    type: "direct",
+  });
+  const json = await new Response(stream).json();
+  expect(json.hello).toBe(true);
+});
+
+it("new Response(stream).blob() (bytes)", async () => {
+  var queue = [Buffer.from(JSON.stringify({ hello: true }))];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      if (chunk) {
+        controller.enqueue(chunk);
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {},
+    type: "bytes",
+  });
+  const response = new Response(stream);
+  const blob = await response.blob();
+  expect(await blob.text()).toBe('{"hello":true}');
+});
+
 it("new Response(stream).blob() (default)", async () => {
   var queue = [Buffer.from(JSON.stringify({ hello: true }))];
   var stream = new ReadableStream({
@@ -794,6 +1037,22 @@ it("new Response(stream).blob() (default)", async () => {
       }
     },
     cancel() {},
+  });
+  const response = new Response(stream);
+  const blob = await response.blob();
+  expect(await blob.text()).toBe('{"hello":true}');
+});
+
+it("new Response(stream).blob() (direct)", async () => {
+  var queue = [Buffer.from(JSON.stringify({ hello: true }))];
+  var stream = new ReadableStream({
+    pull(controller) {
+      var chunk = queue.shift();
+      controller.write(chunk);
+      controller.close();
+    },
+    cancel() {},
+    type: "direct",
   });
   const response = new Response(stream);
   const blob = await response.blob();
@@ -819,7 +1078,7 @@ it("Bun.file().stream() read text from large file", async () => {
     written += sink.write(Bun.SHA1.hash((i++).toString(10), "hex"));
   }
   const hugely = Buffer.from(sink.end()).toString();
-  const tmpfile = join(realpathSync(tmpdir()), "bun-streams-test.txt");
+  const tmpfile = join(realpathSync(tmpdirSync()), "bun-streams-test.txt");
   writeFileSync(tmpfile, hugely);
   try {
     const chunks = [];
@@ -832,4 +1091,54 @@ it("Bun.file().stream() read text from large file", async () => {
   } finally {
     unlinkSync(tmpfile);
   }
+});
+
+it("fs.createReadStream(filename) should be able to break inside async loop", async () => {
+  for (let i = 0; i < 10; i++) {
+    const fileStream = createReadStream(join(import.meta.dir, "..", "fetch", "fixture.png"));
+    for await (const chunk of fileStream) {
+      expect(chunk).toBeDefined();
+      break;
+    }
+    expect(true).toBe(true);
+  }
+});
+
+it("pipeTo doesn't cause unhandled rejections on readable errors", async () => {
+  // https://github.com/WebKit/WebKit/blob/3a75b5d2de94aa396a99b454ac47f3be9e0dc726/LayoutTests/streams/pipeTo-unhandled-promise.html
+  let unhandledRejectionCaught = false;
+
+  const catchUnhandledRejection = () => {
+    unhandledRejectionCaught = true;
+  };
+  process.on("unhandledRejection", catchUnhandledRejection);
+
+  const writable = new WritableStream();
+  const readable = new ReadableStream({ start: c => c.error("error") });
+  readable.pipeTo(writable).catch(() => {});
+
+  await Bun.sleep(15);
+
+  process.off("unhandledRejection", catchUnhandledRejection);
+
+  expect(unhandledRejectionCaught).toBe(false);
+});
+
+it("pipeThrough doesn't cause unhandled rejections on readable errors", async () => {
+  let unhandledRejectionCaught = false;
+
+  const catchUnhandledRejection = () => {
+    unhandledRejectionCaught = true;
+  };
+  process.on("unhandledRejection", catchUnhandledRejection);
+
+  const readable = new ReadableStream({ start: c => c.error("error") });
+  const ts = new TransformStream();
+  readable.pipeThrough(ts);
+
+  await Bun.sleep(15);
+
+  process.off("unhandledRejection", catchUnhandledRejection);
+
+  expect(unhandledRejectionCaught).toBe(false);
 });

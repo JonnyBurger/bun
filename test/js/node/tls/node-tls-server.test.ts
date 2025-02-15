@@ -1,10 +1,12 @@
-import tls, { rootCertificates, connect, createServer, Server, TLSSocket } from "tls";
-import type { PeerCertificate } from "tls";
-import { realpathSync, readFileSync } from "fs";
+import { readFileSync, realpathSync } from "fs";
+import { tls as cert1 } from "harness";
+import { AddressInfo } from "net";
+import { createTest } from "node-harness";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createTest } from "node-harness";
-import { AddressInfo } from "net";
+import type { PeerCertificate } from "tls";
+import tls, { connect, createServer, rootCertificates, Server, TLSSocket } from "tls";
+import { once } from "node:events";
 
 const { describe, expect, it, createCallCheckCtx } = createTest(import.meta.path);
 
@@ -15,11 +17,7 @@ const rawKey = readFileSync(rawKeyFile);
 const certFile = join(import.meta.dir, "fixtures", "rsa_cert.crt");
 const cert = readFileSync(certFile);
 
-const COMMON_CERT: object = {
-  cert: "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKLdQVPy90jjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTkwMjAzMTQ0OTM1WhcNMjAwMjAzMTQ0OTM1WjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEA7i7IIEdICTiSTVx+ma6xHxOtcbd6wGW3nkxlCkJ1UuV8NmY5ovMsGnGD\nhJJtUQ2j5ig5BcJUf3tezqCNW4tKnSOgSISfEAKvpn2BPvaFq3yx2Yjz0ruvcGKp\nDMZBXmB/AAtGyN/UFXzkrcfppmLHJTaBYGG6KnmU43gPkSDy4iw46CJFUOupc51A\nFIz7RsE7mbT1plCM8e75gfqaZSn2k+Wmy+8n1HGyYHhVISRVvPqkS7gVLSVEdTea\nUtKP1Vx/818/HDWk3oIvDVWI9CFH73elNxBkMH5zArSNIBTehdnehyAevjY4RaC/\nkK8rslO3e4EtJ9SnA4swOjCiqAIQEwIDAQABo1AwTjAdBgNVHQ4EFgQUv5rc9Smm\n9c4YnNf3hR49t4rH4yswHwYDVR0jBBgwFoAUv5rc9Smm9c4YnNf3hR49t4rH4ysw\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEATcL9CAAXg0u//eYUAlQa\nL+l8yKHS1rsq1sdmx7pvsmfZ2g8ONQGfSF3TkzkI2OOnCBokeqAYuyT8awfdNUtE\nEHOihv4ZzhK2YZVuy0fHX2d4cCFeQpdxno7aN6B37qtsLIRZxkD8PU60Dfu9ea5F\nDDynnD0TUabna6a0iGn77yD8GPhjaJMOz3gMYjQFqsKL252isDVHEDbpVxIzxPmN\nw1+WK8zRNdunAcHikeoKCuAPvlZ83gDQHp07dYdbuZvHwGj0nfxBLc9qt90XsBtC\n4IYR7c/bcLMmKXYf0qoQ4OzngsnPI5M+v9QEHvYWaKVwFY4CTcSNJEwfXw+BAeO5\nOA==\n-----END CERTIFICATE-----",
-  key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDuLsggR0gJOJJN\nXH6ZrrEfE61xt3rAZbeeTGUKQnVS5Xw2Zjmi8ywacYOEkm1RDaPmKDkFwlR/e17O\noI1bi0qdI6BIhJ8QAq+mfYE+9oWrfLHZiPPSu69wYqkMxkFeYH8AC0bI39QVfOSt\nx+mmYsclNoFgYboqeZTjeA+RIPLiLDjoIkVQ66lznUAUjPtGwTuZtPWmUIzx7vmB\n+pplKfaT5abL7yfUcbJgeFUhJFW8+qRLuBUtJUR1N5pS0o/VXH/zXz8cNaTegi8N\nVYj0IUfvd6U3EGQwfnMCtI0gFN6F2d6HIB6+NjhFoL+QryuyU7d7gS0n1KcDizA6\nMKKoAhATAgMBAAECggEAd5g/3o1MK20fcP7PhsVDpHIR9faGCVNJto9vcI5cMMqP\n6xS7PgnSDFkRC6EmiLtLn8Z0k2K3YOeGfEP7lorDZVG9KoyE/doLbpK4MfBAwBG1\nj6AHpbmd5tVzQrnNmuDjBBelbDmPWVbD0EqAFI6mphXPMqD/hFJWIz1mu52Kt2s6\n++MkdqLO0ORDNhKmzu6SADQEcJ9Suhcmv8nccMmwCsIQAUrfg3qOyqU4//8QB8ZM\njosO3gMUesihVeuF5XpptFjrAliPgw9uIG0aQkhVbf/17qy0XRi8dkqXj3efxEDp\n1LSqZjBFiqJlFchbz19clwavMF/FhxHpKIhhmkkRSQKBgQD9blaWSg/2AGNhRfpX\nYq+6yKUkUD4jL7pmX1BVca6dXqILWtHl2afWeUorgv2QaK1/MJDH9Gz9Gu58hJb3\nymdeAISwPyHp8euyLIfiXSAi+ibKXkxkl1KQSweBM2oucnLsNne6Iv6QmXPpXtro\nnTMoGQDS7HVRy1on5NQLMPbUBQKBgQDwmN+um8F3CW6ZV1ZljJm7BFAgNyJ7m/5Q\nYUcOO5rFbNsHexStrx/h8jYnpdpIVlxACjh1xIyJ3lOCSAWfBWCS6KpgeO1Y484k\nEYhGjoUsKNQia8UWVt+uWnwjVSDhQjy5/pSH9xyFrUfDg8JnSlhsy0oC0C/PBjxn\nhxmADSLnNwKBgQD2A51USVMTKC9Q50BsgeU6+bmt9aNMPvHAnPf76d5q78l4IlKt\nwMs33QgOExuYirUZSgjRwknmrbUi9QckRbxwOSqVeMOwOWLm1GmYaXRf39u2CTI5\nV9gTMHJ5jnKd4gYDnaA99eiOcBhgS+9PbgKSAyuUlWwR2ciL/4uDzaVeDQKBgDym\nvRSeTRn99bSQMMZuuD5N6wkD/RxeCbEnpKrw2aZVN63eGCtkj0v9LCu4gptjseOu\n7+a4Qplqw3B/SXN5/otqPbEOKv8Shl/PT6RBv06PiFKZClkEU2T3iH27sws2EGru\nw3C3GaiVMxcVewdg1YOvh5vH8ZVlxApxIzuFlDvnAoGAN5w+gukxd5QnP/7hcLDZ\nF+vesAykJX71AuqFXB4Wh/qFY92CSm7ImexWA/L9z461+NKeJwb64Nc53z59oA10\n/3o2OcIe44kddZXQVP6KTZBd7ySVhbtOiK3/pCy+BQRsrC7d71W914DxNWadwZ+a\njtwwKjDzmPwdIXDSQarCx0U=\n-----END PRIVATE KEY-----",
-  passphrase: "1234",
-};
+const COMMON_CERT = { ...cert1 };
 
 const socket_domain = join(realpathSync(tmpdir()), "node-tls-server.sock");
 
@@ -300,36 +298,42 @@ describe("tls.createServer", () => {
           expect(cert).toBeDefined();
           expect(cert.subject).toBeDefined();
           expect(cert.subject).toMatchObject({
-            C: "AU",
-            ST: "Some-State",
-            O: "Internet Widgits Pty Ltd",
+            C: "US",
+            CN: "server-bun",
+            L: "San Francisco",
+            O: "Oven",
+            OU: "Team Bun",
+            ST: "CA",
           });
 
           expect(cert.issuer).toBeDefined();
           expect(cert.issuer).toMatchObject({
-            C: "AU",
-            ST: "Some-State",
-            O: "Internet Widgits Pty Ltd",
+            C: "US",
+            CN: "server-bun",
+            L: "San Francisco",
+            O: "Oven",
+            OU: "Team Bun",
+            ST: "CA",
           });
 
-          expect(cert.ca).toBeTrue();
+          expect(cert.ca).toBeFalse();
           expect(cert.bits).toBe(2048);
           expect(cert.modulus).toBe(
-            "EE2EC82047480938924D5C7E99AEB11F13AD71B77AC065B79E4C650A427552E57C366639A2F32C1A718384926D510DA3E6283905C2547F7B5ECEA08D5B8B4A9D23A048849F1002AFA67D813EF685AB7CB1D988F3D2BBAF7062A90CC6415E607F000B46C8DFD4157CE4ADC7E9A662C72536816061BA2A7994E3780F9120F2E22C38E8224550EBA9739D40148CFB46C13B99B4F5A6508CF1EEF981FA9A6529F693E5A6CBEF27D471B2607855212455BCFAA44BB8152D254475379A52D28FD55C7FF35F3F1C35A4DE822F0D5588F42147EF77A5371064307E7302B48D2014DE85D9DE87201EBE363845A0BF90AF2BB253B77B812D27D4A7038B303A30A2A8021013",
+            "beee8773af7c8861ec11351188b9b1798734fb0729b674369be3285a29fe5dacbfab700d09d7904cf1027d89298bd68be0ef1df94363012b0deb97f632cb76894bcc216535337b9db6125ef68996dd35b4bea07e86c41da071907a86651e84f8c72141f889cc0f770554791e9f07bbe47c375d2d77b44dbe2ab0ed442bc1f49abe4f8904977e3dfd61cd501d8eff819ff1792aedffaca7d281fd1db8c5d972d22f68fa7103ca11ac9aaed1cdd12c33c0b8b47964b37338953d2415edce8b83d52e2076ca960385cc3a5ca75a75951aafdb2ad3db98a6fdd4baa32f575fea7b11f671a9eaa95d7d9faf958ac609f3c48dec5bddcf1bc1542031ed9d4b281d7dd1",
           );
           expect(cert.exponent).toBe("0x10001");
           expect(cert.pubkey).toBeInstanceOf(Buffer);
           // yes these spaces are intentional
-          expect(cert.valid_from).toBe("Feb  3 14:49:35 2019 GMT");
-          expect(cert.valid_to).toBe("Feb  3 14:49:35 2020 GMT");
-          expect(cert.fingerprint).toBe("48:5F:4B:DB:FD:56:50:32:F0:27:84:3C:3F:B9:6C:DB:13:42:D2:D4");
+          expect(cert.valid_from).toBe("Sep  6 23:27:34 2023 GMT");
+          expect(cert.valid_to).toBe("Sep  5 23:27:34 2025 GMT");
+          expect(cert.fingerprint).toBe("E3:90:9C:A8:AB:80:48:37:8D:CE:11:64:45:3A:EB:AD:C8:3C:B3:5C");
           expect(cert.fingerprint256).toBe(
-            "40:F9:8C:B8:9D:3C:0D:93:09:C4:A7:96:B8:A4:69:03:6C:DB:1B:83:C9:0E:76:AE:4A:F4:16:1A:A6:13:50:B2",
+            "53:DD:15:78:60:FD:66:8C:43:9E:19:7E:CF:2C:AF:49:3C:D1:11:EC:61:2D:F5:DC:1D:0A:FA:CD:12:F9:F8:E0",
           );
           expect(cert.fingerprint512).toBe(
-            "98:56:9F:C0:A7:21:AD:BE:F3:11:AD:78:17:61:7C:36:AE:85:AB:AC:9E:1E:BF:AA:F2:92:0D:8B:36:50:07:CF:7B:C3:16:19:0F:1F:B9:09:C9:45:9D:EC:C9:44:66:72:EE:EA:CF:74:23:13:B5:FB:E1:88:52:51:D2:C6:B6:4D",
+            "2D:31:CB:D2:A0:CA:E5:D4:B5:59:11:48:4B:BC:65:11:4F:AB:02:24:59:D8:73:43:2F:9A:31:92:BC:AF:26:66:CD:DB:8B:03:74:0C:C1:84:AF:54:2D:7C:FD:EF:07:6E:85:66:98:6B:82:4F:A5:72:97:A2:19:8C:7B:57:D6:15",
           );
-          expect(cert.serialNumber).toBe("A2DD4153F2F748E3");
+          expect(cert.serialNumber).toBe("1da7a7b8d71402ed2d8c3646a5cedf2b8117efc8");
 
           expect(cert.raw).toBeInstanceOf(Buffer);
           client?.end();
@@ -357,6 +361,8 @@ describe("tls.createServer", () => {
       client = connect({
         port: address.port,
         host: address.address,
+        secureContext: tls.createSecureContext(COMMON_CERT),
+        rejectUnauthorized: false,
       });
     });
   });
@@ -459,15 +465,12 @@ describe("tls.createServer events", () => {
     );
   });
 
-  it("should call close", done => {
-    let closed = false;
+  it("should call close", async () => {
+    const { promise, reject, resolve } = Promise.withResolvers();
     const server: Server = createServer(COMMON_CERT);
-    server.listen().on("close", () => {
-      closed = true;
-    });
+    server.listen().on("close", resolve).on("error", reject);
     server.close();
-    expect(closed).toBe(true);
-    done();
+    await promise;
   });
 
   it("should call connection and drop", done => {
@@ -623,6 +626,9 @@ describe("tls.createServer events", () => {
           hostname: address.address,
           port: address.port,
           socket: {
+            error(socket, err) {
+              closeAndFail();
+            },
             drain(socket) {
               socket.write("Hello");
             },
@@ -656,4 +662,45 @@ it("tls.rootCertificates should exists", () => {
   expect(rootCertificates).toBeInstanceOf(Array);
   expect(rootCertificates.length).toBeGreaterThan(0);
   expect(typeof rootCertificates[0]).toBe("string");
+});
+
+it("connectionListener should emit the right amount of times, and with alpnProtocol available", async () => {
+  let count = 0;
+  const promises = [];
+  const server: Server = createServer(
+    {
+      ...COMMON_CERT,
+      ALPNProtocols: ["bun"],
+    },
+    socket => {
+      count++;
+      expect(socket.alpnProtocol).toBe("bun");
+      socket.end();
+    },
+  );
+  server.setMaxListeners(100);
+
+  server.listen(0);
+  await once(server, "listening");
+  for (let i = 0; i < 50; i++) {
+    const { promise, resolve } = Promise.withResolvers();
+    promises.push(promise);
+    const socket = connect(
+      {
+        ca: COMMON_CERT.cert,
+        rejectUnauthorized: false,
+        port: server.address().port,
+        host: "127.0.0.1",
+        ALPNProtocols: ["bun"],
+      },
+      () => {
+        socket.on("close", resolve);
+        socket.resume();
+        socket.end();
+      },
+    );
+  }
+
+  await Promise.all(promises);
+  expect(count).toBe(50);
 });

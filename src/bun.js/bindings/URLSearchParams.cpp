@@ -64,6 +64,8 @@ URLSearchParams::URLSearchParams(const Vector<KeyValuePair<String, String>>& pai
 {
 }
 
+URLSearchParams::~URLSearchParams() = default;
+
 ExceptionOr<Ref<URLSearchParams>> URLSearchParams::create(std::variant<Vector<Vector<String>>, Vector<KeyValuePair<String, String>>, String>&& variant)
 {
     auto visitor = WTF::makeVisitor([&](const Vector<Vector<String>>& vector) -> ExceptionOr<Ref<URLSearchParams>> {
@@ -77,7 +79,7 @@ ExceptionOr<Ref<URLSearchParams>> URLSearchParams::create(std::variant<Vector<Ve
     return std::visit(visitor, variant);
 }
 
-String URLSearchParams::get(const String& name) const
+String URLSearchParams::get(const StringView name) const
 {
     for (const auto& pair : m_pairs) {
         if (pair.key == name)
@@ -86,7 +88,7 @@ String URLSearchParams::get(const String& name) const
     return String();
 }
 
-bool URLSearchParams::has(const String& name, const String& value) const
+bool URLSearchParams::has(const StringView name, const String& value) const
 {
     for (const auto& pair : m_pairs) {
         if (pair.key == name && (value.isNull() || pair.value == value))
@@ -136,7 +138,7 @@ void URLSearchParams::append(const String& name, const String& value)
     needsSorting = true;
 }
 
-Vector<String> URLSearchParams::getAll(const String& name) const
+Vector<String> URLSearchParams::getAll(const StringView name) const
 {
     Vector<String> values;
     values.reserveInitialCapacity(m_pairs.size());
@@ -148,7 +150,7 @@ Vector<String> URLSearchParams::getAll(const String& name) const
     return values;
 }
 
-void URLSearchParams::remove(const String& name, const String& value)
+void URLSearchParams::remove(const StringView name, const String& value)
 {
     m_pairs.removeAllMatching([&](const auto& pair) {
         return pair.key == name && (value.isNull() || pair.value == value);
@@ -190,4 +192,13 @@ URLSearchParams::Iterator::Iterator(URLSearchParams& params)
 {
 }
 
+size_t URLSearchParams::memoryCost() const
+{
+    size_t cost = sizeof(URLSearchParams);
+    for (const auto& pair : m_pairs) {
+        cost += pair.key.sizeInBytes();
+        cost += pair.value.sizeInBytes();
+    }
+    return cost;
+}
 }

@@ -1,12 +1,8 @@
-import assert from "assert";
-import { itBundled, testForFile } from "./expectBundled";
-var { describe, test, expect } = testForFile(import.meta.path);
+import { describe, expect } from "bun:test";
+import { itBundled } from "./expectBundled";
 
 describe("bundler", () => {
   itBundled("minify/TemplateStringFolding", {
-    // TODO: https://github.com/oven-sh/bun/issues/4217
-    todo: true,
-
     files: {
       "/entry.js": /* js */ `
         capture(\`\${1}-\${2}-\${3}-\${null}-\${undefined}-\${true}-\${false}\`);
@@ -29,6 +25,11 @@ describe("bundler", () => {
         capture(\`😋📋👌\`.length == 6)
         capture(\`😋📋👌\`.length === 2)
         capture(\`😋📋👌\`.length == 2)
+        capture(\`\\n\`.length)
+        capture(\`\n\`.length)
+        capture("\\uD800\\uDF34".length)
+        capture("\\u{10334}".length)
+        capture("𐌴".length)
       `,
     },
     capture: [
@@ -52,9 +53,25 @@ describe("bundler", () => {
       "!0",
       "!1",
       "!1",
+      "1",
+      "1",
+      "2",
+      "2",
+      "2",
     ],
     minifySyntax: true,
     target: "bun",
+  });
+  itBundled("minify/StringAdditionFolding", {
+    files: {
+      "/entry.js": /* js */ `
+        capture("Objects are not valid as a React child (found: " + (childString === "[object Object]" ? "object with keys {" + Object.keys(node).join(", ") + "}" : childString) + "). " + "If you meant to render a collection of children, use an array " + "instead.")
+      `,
+    },
+    capture: [
+      '"Objects are not valid as a React child (found: " + (childString === "[object Object]" ? "object with keys {" + Object.keys(node).join(", ") + "}" : childString) + "). If you meant to render a collection of children, use an array instead."',
+    ],
+    minifySyntax: true,
   });
   itBundled("minify/FunctionExpressionRemoveName", {
     todo: true,
@@ -122,8 +139,68 @@ describe("bundler", () => {
     run: { stdout: "4 2 3\n4 5 3\n4 5 6" },
     onAfterBundle(api) {
       const code = api.readFile("/out.js");
-      assert([...code.matchAll(/var /g)].length === 1, "expected only 1 variable declaration statement");
+      expect([...code.matchAll(/var /g)]).toHaveLength(1);
     },
+  });
+  itBundled("minify/Infinity", {
+    files: {
+      "/entry.js": /* js */ `
+        capture(Infinity);
+        capture(-Infinity);
+        capture(Infinity + 1);
+        capture(-Infinity - 1);
+        capture(Infinity / 0);
+        capture(-Infinity / 0);
+        capture(Infinity * 0);
+        capture(-Infinity * 0);
+        capture(Infinity % 1);
+        capture(-Infinity % 1);
+        capture(Infinity ** 1);
+        capture(-(Infinity ** 1));
+        capture(~Infinity);
+        capture(~-Infinity);
+      `,
+    },
+    capture: [
+      "1 / 0",
+      "-1 / 0",
+      "1 / 0",
+      "-1 / 0",
+      "1 / 0",
+      "-1 / 0",
+      "NaN",
+      "NaN",
+      "NaN",
+      "NaN",
+      "1 / 0",
+      "-1 / 0",
+      "-1",
+      "-1",
+    ],
+    minifySyntax: true,
+  });
+  itBundled("minify+whitespace/Infinity", {
+    files: {
+      "/entry.js": /* js */ `
+        capture(Infinity);
+        capture(-Infinity);
+        capture(Infinity + 1);
+        capture(-Infinity - 1);
+        capture(Infinity / 0);
+        capture(-Infinity / 0);
+        capture(Infinity * 0);
+        capture(-Infinity * 0);
+        capture(Infinity % 1);
+        capture(-Infinity % 1);
+        capture(Infinity ** 1);
+        capture((-Infinity) ** 2);
+        capture(~Infinity);
+        capture(~-Infinity);
+      `,
+    },
+    capture: ["1/0", "-1/0", "1/0", "-1/0", "1/0", "-1/0", "NaN", "NaN", "NaN", "NaN", "1/0", "1/0", "-1", "-1"],
+    minifySyntax: true,
+    minifyWhitespace: true,
   });
   itBundled("minify/InlineArraySpread", {
     files: {
@@ -326,5 +403,103 @@ describe("bundler", () => {
     run: {
       stdout: "PASS",
     },
+  });
+  itBundled("minify/RequireInDeadBranch", {
+    files: {
+      "/entry.ts": /* js */ `
+        if (0 !== 0) {
+          require;
+        }
+      `,
+    },
+    outfile: "/out.js",
+    minifySyntax: true,
+    onAfterBundle(api) {
+      // This should not be marked as a CommonJS module
+      api.expectFile("/out.js").not.toContain("require");
+      api.expectFile("/out.js").not.toContain("module");
+    },
+  });
+  itBundled("minify/TypeOfRequire", {
+    files: {
+      "/entry.ts": /* js */ `
+        capture(typeof require); 
+      `,
+    },
+    outfile: "/out.js",
+    capture: ['"function"'],
+    minifySyntax: true,
+    onAfterBundle(api) {
+      // This should not be marked as a CommonJS module
+      api.expectFile("/out.js").not.toContain("require");
+      api.expectFile("/out.js").not.toContain("module");
+    },
+  });
+  itBundled("minify/RequireMainToImportMetaMain", {
+    files: {
+      "/entry.ts": /* js */ `
+        capture(require.main === module); 
+        capture(require.main !== module); 
+        capture(require.main == module); 
+        capture(require.main != module); 
+        capture(!(require.main === module)); 
+        capture(!(require.main !== module)); 
+        capture(!(require.main == module)); 
+        capture(!(require.main != module)); 
+        capture(!!(require.main === module)); 
+        capture(!!(require.main !== module)); 
+        capture(!!(require.main == module)); 
+        capture(!!(require.main != module)); 
+      `,
+    },
+    outfile: "/out.js",
+    capture: [
+      "import.meta.main",
+      "!import.meta.main",
+      "import.meta.main",
+      "!import.meta.main",
+      "!import.meta.main",
+      "import.meta.main",
+      "!import.meta.main",
+      "import.meta.main",
+      "import.meta.main",
+      "!import.meta.main",
+      "import.meta.main",
+      "!import.meta.main",
+    ],
+    minifySyntax: true,
+    onAfterBundle(api) {
+      // This should not be marked as a CommonJS module
+      api.expectFile("/out.js").not.toContain("require");
+      api.expectFile("/out.js").not.toContain("module");
+    },
+  });
+  itBundled("minify/ConstantFoldingUnaryPlusString", {
+    files: {
+      "/entry.ts": `
+        // supported
+        capture(+'1.0');
+        capture(+'-123.567');
+        capture(+'8.325');
+        capture(+'100000000');
+        capture(+'\\u0030\\u002e\\u0031');
+        capture(+'\\x30\\x2e\\x31');
+        capture(+'NotANumber');
+        // not supported
+        capture(+'æ');
+      `,
+    },
+    minifySyntax: true,
+    capture: [
+      "1",
+      "-123.567",
+      "8.325",
+      "1e8",
+      "0.1",
+      "0.1",
+      "NaN",
+      // untouched
+      '+"æ"',
+    ],
   });
 });

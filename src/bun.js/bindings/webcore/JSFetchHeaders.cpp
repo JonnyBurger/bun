@@ -40,6 +40,7 @@
 #include "JSDOMIterator.h"
 #include "JSDOMOperation.h"
 #include "JSDOMWrapperCache.h"
+#include "JavaScriptCore/JSCJSValue.h"
 #include "ScriptExecutionContext.h"
 #include "WebCoreJSClientData.h"
 #include <JavaScriptCore/BuiltinNames.h>
@@ -115,9 +116,16 @@ STATIC_ASSERT_ISO_SUBSPACE_SHARABLE(JSFetchHeadersPrototype, JSFetchHeadersProto
 
 using JSFetchHeadersDOMConstructor = JSDOMConstructor<JSFetchHeaders>;
 
+size_t JSFetchHeaders::estimatedSize(JSC::JSCell* cell, JSC::VM& vm)
+{
+    auto* thisObject = jsCast<JSFetchHeaders*>(cell);
+    auto& wrapped = thisObject->wrapped();
+    return Base::estimatedSize(cell, vm) + wrapped.memoryCost();
+}
+
 template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSFetchHeadersDOMConstructor::construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
 {
-    VM& vm = lexicalGlobalObject->vm();
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* castedThis = jsCast<JSFetchHeadersDOMConstructor*>(callFrame->jsCallee());
     ASSERT(castedThis);
@@ -138,7 +146,7 @@ template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSFetchHeadersDOMConstru
         init = std::optional<Converter<IDLUnion<IDLSequence<IDLSequence<IDLDOMString>>, IDLRecord<IDLDOMString, IDLDOMString>>>::ReturnType>(convert<IDLUnion<IDLSequence<IDLSequence<IDLDOMString>>, IDLRecord<IDLDOMString, IDLDOMString>>>(*lexicalGlobalObject, argument0.value()));
     }
 
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     auto object = FetchHeaders::create(WTFMove(init));
     if constexpr (IsExceptionOr<decltype(object)>)
         RETURN_IF_EXCEPTION(throwScope, {});
@@ -199,14 +207,16 @@ JSC_DEFINE_HOST_FUNCTION(jsFetchHeadersPrototypeFunction_getAll, (JSGlobalObject
 
     if (UNLIKELY(!callFrame->argumentCount())) {
         throwTypeError(lexicalGlobalObject, scope, "Missing argument"_s);
-        return JSValue::encode(jsUndefined());
+        return {};
     }
 
-    auto name = convert<IDLDOMString>(*lexicalGlobalObject, callFrame->uncheckedArgument(0));
-    RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
+    auto* nameStr = callFrame->uncheckedArgument(0).toString(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    auto name = nameStr->view(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(scope, {});
 
     auto& impl = castedThis->wrapped();
-    if (name.length() != "set-cookie"_s.length() || name.convertToASCIILowercase() != "set-cookie"_s) {
+    if (name->length() != "set-cookie"_s.length() || name->convertToASCIILowercase() != "set-cookie"_s) {
         throwTypeError(lexicalGlobalObject, scope, "Only \"set-cookie\" is supported."_s);
     }
 
@@ -236,22 +246,22 @@ JSC_DEFINE_HOST_FUNCTION(jsFetchHeadersPrototypeFunction_getAll, (JSGlobalObject
 
     } else {
         array = constructEmptyArray(lexicalGlobalObject, nullptr, count);
-        RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
+        RETURN_IF_EXCEPTION(scope, {});
         if (!array) {
             throwOutOfMemoryError(lexicalGlobalObject, scope);
-            return JSValue::encode(jsUndefined());
+            return {};
         }
         for (unsigned i = 0; i < count; ++i) {
             array->putDirectIndex(lexicalGlobalObject, i, strings.at(i));
-            RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
+            RETURN_IF_EXCEPTION(scope, {});
         }
     }
 
-    RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
+    RETURN_IF_EXCEPTION(scope, {});
     return JSValue::encode(array);
 }
 
-JSC_DEFINE_HOST_FUNCTION(fetchHeadersGetSetCookie, (JSC::JSGlobalObject * lexicalGlobalObject, VM& vm, WebCore::FetchHeaders* impl))
+JSC::EncodedJSValue fetchHeadersGetSetCookie(JSC::JSGlobalObject* lexicalGlobalObject, VM& vm, WebCore::FetchHeaders* impl)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
 
@@ -263,15 +273,15 @@ JSC_DEFINE_HOST_FUNCTION(fetchHeadersGetSetCookie, (JSC::JSGlobalObject * lexica
     }
 
     JSC::JSArray* array = constructEmptyArray(lexicalGlobalObject, nullptr, count);
-    RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    RETURN_IF_EXCEPTION(scope, {});
     if (UNLIKELY(!array)) {
         throwOutOfMemoryError(lexicalGlobalObject, scope);
-        return encodedJSValue();
+        return {};
     }
 
     for (unsigned i = 0; i < count; ++i) {
         array->putDirectIndex(lexicalGlobalObject, i, jsString(vm, values[i]));
-        RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        RETURN_IF_EXCEPTION(scope, {});
     }
 
     return JSValue::encode(array);
@@ -334,8 +344,12 @@ void JSFetchHeaders::finishCreation(VM& vm)
 
 void JSFetchHeaders::computeMemoryCost()
 {
+    size_t previousCost = m_memoryCost;
     m_memoryCost = wrapped().memoryCost();
-    globalObject()->vm().heap.reportExtraMemoryAllocated(this, m_memoryCost);
+    int64_t diff = static_cast<int64_t>(m_memoryCost) - static_cast<int64_t>(previousCost);
+    if (diff > 0) {
+        globalObject()->vm().heap.reportExtraMemoryAllocated(this, static_cast<uint64_t>(diff));
+    }
 }
 
 JSObject* JSFetchHeaders::createPrototype(VM& vm, JSDOMGlobalObject& globalObject)
@@ -363,7 +377,7 @@ void JSFetchHeaders::destroy(JSC::JSCell* cell)
 
 JSC_DEFINE_CUSTOM_GETTER(jsFetchHeadersConstructor, (JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue, PropertyName))
 {
-    VM& vm = JSC::getVM(lexicalGlobalObject);
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* prototype = jsDynamicCast<JSFetchHeadersPrototype*>(JSValue::decode(thisValue));
     if (UNLIKELY(!prototype))
@@ -382,10 +396,10 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_appendBody(JSC
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     EnsureStillAliveScope argument1 = callFrame->uncheckedArgument(1);
     auto value = convert<IDLDOMString>(*lexicalGlobalObject, argument1.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLUndefined>(*lexicalGlobalObject, throwScope, [&]() -> decltype(auto) { return impl.append(WTFMove(name), WTFMove(value)); })));
 }
 
@@ -417,9 +431,11 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_deleteBody(JSC
     if (UNLIKELY(callFrame->argumentCount() < 1))
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
-    auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
-    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLUndefined>(*lexicalGlobalObject, throwScope, [&]() -> decltype(auto) { return impl.remove(WTFMove(name)); })));
+    auto* nameString = argument0.value().toString(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    const auto name = nameString->view(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLUndefined>(*lexicalGlobalObject, throwScope, [&]() -> decltype(auto) { return impl.remove(name); })));
 }
 
 JSC_DEFINE_HOST_FUNCTION(jsFetchHeadersPrototypeFunction_delete, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
@@ -437,9 +453,11 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_getBody(JSC::J
     if (UNLIKELY(callFrame->argumentCount() < 1))
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
-    auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
-    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLNullable<IDLDOMString>>(*lexicalGlobalObject, throwScope, impl.get(WTFMove(name)))));
+    auto* nameString = argument0.value().toString(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    const auto name = nameString->view(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLNullable<IDLDOMString>>(*lexicalGlobalObject, throwScope, impl.get(name))));
 }
 
 JSC_DEFINE_HOST_FUNCTION(jsFetchHeadersPrototypeFunction_get, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
@@ -457,9 +475,11 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_hasBody(JSC::J
     if (UNLIKELY(callFrame->argumentCount() < 1))
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
-    auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
-    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLBoolean>(*lexicalGlobalObject, throwScope, impl.has(WTFMove(name)))));
+    auto* nameString = argument0.value().toString(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    const auto name = nameString->view(lexicalGlobalObject);
+    RETURN_IF_EXCEPTION(throwScope, {});
+    RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLBoolean>(*lexicalGlobalObject, throwScope, impl.has(name))));
 }
 
 JSC_DEFINE_HOST_FUNCTION(jsFetchHeadersPrototypeFunction_has, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
@@ -478,10 +498,10 @@ static inline JSC::EncodedJSValue jsFetchHeadersPrototypeFunction_setBody(JSC::J
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto name = convert<IDLDOMString>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     EnsureStillAliveScope argument1 = callFrame->uncheckedArgument(1);
     auto value = convert<IDLDOMString>(*lexicalGlobalObject, argument1.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     RELEASE_AND_RETURN(throwScope, JSValue::encode(toJS<IDLUndefined>(*lexicalGlobalObject, throwScope, [&]() -> decltype(auto) { return impl.set(WTFMove(name), WTFMove(value)); })));
 }
 
@@ -598,7 +618,7 @@ void JSFetchHeaders::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     auto* thisObject = jsCast<JSFetchHeaders*>(cell);
     analyzer.setWrappedObjectForCell(cell, &thisObject->wrapped());
     if (thisObject->scriptExecutionContext())
-        analyzer.setLabelForCell(cell, "url " + thisObject->scriptExecutionContext()->url().string());
+        analyzer.setLabelForCell(cell, makeString("url "_s, thisObject->scriptExecutionContext()->url().string()));
     Base::analyzeHeap(cell, analyzer);
 }
 
@@ -660,7 +680,7 @@ JSC::JSValue getInternalProperties(JSC::VM& vm, JSGlobalObject* lexicalGlobalObj
     RELEASE_AND_RETURN(throwScope, obj);
 }
 
-bool JSFetchHeadersOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, const char** reason)
+bool JSFetchHeadersOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown> handle, void*, AbstractSlotVisitor& visitor, ASCIILiteral* reason)
 {
     UNUSED_PARAM(handle);
     UNUSED_PARAM(visitor);
@@ -703,18 +723,18 @@ JSC::JSValue toJSNewlyCreated(JSC::JSGlobalObject*, JSDOMGlobalObject* globalObj
 {
     if constexpr (std::is_polymorphic_v<FetchHeaders>) {
 #if ENABLE(BINDING_INTEGRITY)
-        const void* actualVTablePointer = getVTablePointer(impl.ptr());
+        // const void* actualVTablePointer = getVTablePointer(impl.ptr());
 #if PLATFORM(WIN)
         void* expectedVTablePointer = __identifier("??_7FetchHeaders@WebCore@@6B@");
 #else
-        void* expectedVTablePointer = &_ZTVN7WebCore12FetchHeadersE[2];
+        // void* expectedVTablePointer = &_ZTVN7WebCore12FetchHeadersE[2];
 #endif
 
         // If you hit this assertion you either have a use after free bug, or
         // FetchHeaders has subclasses. If FetchHeaders has subclasses that get passed
         // to toJS() we currently require FetchHeaders you to opt out of binding hardening
         // by adding the SkipVTableValidation attribute to the interface IDL definition
-        RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+        // RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
 #endif
     }
     return createWrapper<FetchHeaders>(globalObject, WTFMove(impl));

@@ -17,6 +17,10 @@ const ZigString = JSC.ZigString;
 
 const ClosingState = Blob.ClosingState;
 
+pub const WriteFileResultType = SystemError.Maybe(SizeType);
+pub const WriteFileOnWriteFileCallback = *const fn (ctx: *anyopaque, count: WriteFileResultType) void;
+pub const WriteFileTask = JSC.WorkTask(WriteFile);
+
 pub const WriteFile = struct {
     file_blob: Blob,
     bytes_blob: Blob,
@@ -31,24 +35,22 @@ pub const WriteFile = struct {
     state: std.atomic.Value(ClosingState) = std.atomic.Value(ClosingState).init(.running),
 
     onCompleteCtx: *anyopaque = undefined,
-    onCompleteCallback: OnWriteFileCallback = undefined,
+    onCompleteCallback: WriteFileOnWriteFileCallback = undefined,
     total_written: usize = 0,
 
     could_block: bool = false,
     close_after_io: bool = false,
     mkdirp_if_not_exists: bool = false,
 
-    pub const ResultType = SystemError.Maybe(SizeType);
-    pub const OnWriteFileCallback = *const fn (ctx: *anyopaque, count: ResultType) void;
     pub const io_tag = io.Poll.Tag.WriteFile;
 
     pub usingnamespace FileOpenerMixin(WriteFile);
     pub usingnamespace FileCloserMixin(WriteFile);
 
-    pub const open_flags = std.os.O.WRONLY | std.os.O.CREAT | std.os.O.TRUNC | std.os.O.NONBLOCK;
+    pub const open_flags = bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC | bun.O.NONBLOCK;
 
     pub fn onWritable(request: *io.Request) void {
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         this.onReady();
     }
 
@@ -69,7 +71,7 @@ pub const WriteFile = struct {
     pub fn onRequestWritable(request: *io.Request) io.Action {
         bloblog("WriteFile.onRequestWritable()", .{});
         request.scheduled = false;
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         return io.Action{
             .writable = .{
                 .onError = @ptrCast(&onIOError),
@@ -83,7 +85,7 @@ pub const WriteFile = struct {
 
     pub fn waitForWritable(this: *WriteFile) void {
         this.close_after_io = true;
-        @atomicStore(@TypeOf(this.io_request.callback), &this.io_request.callback, &onRequestWritable, .SeqCst);
+        @atomicStore(@TypeOf(this.io_request.callback), &this.io_request.callback, &onRequestWritable, .seq_cst);
         if (!this.io_request.scheduled)
             io.Loop.get().schedule(&this.io_request);
     }
@@ -92,7 +94,7 @@ pub const WriteFile = struct {
         file_blob: Blob,
         bytes_blob: Blob,
         onWriteFileContext: *anyopaque,
-        onCompleteCallback: OnWriteFileCallback,
+        onCompleteCallback: WriteFileOnWriteFileCallback,
         mkdirp_if_not_exists: bool,
     ) !*WriteFile {
         const write_file = bun.new(WriteFile, WriteFile{
@@ -113,11 +115,11 @@ pub const WriteFile = struct {
         bytes_blob: Blob,
         comptime Context: type,
         context: Context,
-        comptime callback: fn (ctx: Context, bytes: ResultType) void,
+        comptime callback: fn (ctx: Context, bytes: WriteFileResultType) void,
         mkdirp_if_not_exists: bool,
     ) !*WriteFile {
         const Handler = struct {
-            pub fn run(ptr: *anyopaque, bytes: ResultType) void {
+            pub fn run(ptr: *anyopaque, bytes: WriteFileResultType) void {
                 callback(bun.cast(Context, ptr), bytes);
             }
         };
@@ -178,8 +180,6 @@ pub const WriteFile = struct {
         return true;
     }
 
-    pub const WriteFileTask = JSC.WorkTask(@This());
-
     pub fn then(this: *WriteFile, _: *JSC.JSGlobalObject) void {
         const cb = this.onCompleteCallback;
         const cb_ctx = this.onCompleteCtx;
@@ -199,6 +199,7 @@ pub const WriteFile = struct {
         bun.destroy(this);
         cb(cb_ctx, .{ .result = @as(SizeType, @truncate(wrote)) });
     }
+
     pub fn run(this: *WriteFile, task: *WriteFileTask) void {
         if (Environment.isWindows) {
             @panic("todo");
@@ -295,7 +296,7 @@ pub const WriteFile = struct {
     }
 
     fn doWriteLoopTask(task: *JSC.WorkPoolTask) void {
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "task", task);
+        var this: *WriteFile = @fieldParentPtr("task", task);
         // On macOS, we use one-shot mode, so we don't need to unregister.
         if (comptime Environment.isMac) {
             this.close_after_io = false;
@@ -308,7 +309,8 @@ pub const WriteFile = struct {
     }
 
     fn doWriteLoop(this: *WriteFile) void {
-        while (this.state.load(.Monotonic) == .running) {
+        if (Environment.isWindows) return; //why
+        while (this.state.load(.monotonic) == .running) {
             var remain = this.bytes_blob.sharedView();
 
             remain = remain[@min(this.total_written, remain.len)..];
@@ -355,7 +357,7 @@ pub const WriteFileWindows = struct {
     io_request: uv.fs_t,
     file_blob: Blob,
     bytes_blob: Blob,
-    onCompleteCallback: OnWriteFileCallback,
+    onCompleteCallback: WriteFileOnWriteFileCallback,
     onCompleteCtx: *anyopaque,
     mkdirp_if_not_exists: bool = false,
     uv_bufs: [1]uv.uv_buf_t,
@@ -374,7 +376,7 @@ pub const WriteFileWindows = struct {
         bytes_blob: Blob,
         event_loop: *bun.JSC.EventLoop,
         onWriteFileContext: *anyopaque,
-        onCompleteCallback: OnWriteFileCallback,
+        onCompleteCallback: WriteFileOnWriteFileCallback,
         mkdirp_if_not_exists: bool,
     ) *WriteFileWindows {
         const write_file = WriteFileWindows.new(.{
@@ -416,11 +418,9 @@ pub const WriteFileWindows = struct {
             },
         }
 
-        write_file.loop().refConcurrently();
+        write_file.event_loop.refConcurrently();
         return write_file;
     }
-    pub const ResultType = WriteFile.ResultType;
-    pub const OnWriteFileCallback = WriteFile.OnWriteFileCallback;
 
     pub inline fn loop(this: *const WriteFileWindows) *uv.Loop {
         return this.event_loop.virtual_machine.event_loop_handle.?;
@@ -432,7 +432,7 @@ pub const WriteFileWindows = struct {
         const rc = uv.uv_fs_open(
             this.loop(),
             &this.io_request,
-            &(std.os.toPosixPath(path) catch {
+            &(std.posix.toPosixPath(path) catch {
                 this.throw(bun.sys.Error{
                     .errno = @intFromEnum(bun.C.E.NAMETOOLONG),
                     .syscall = .open,
@@ -459,7 +459,7 @@ pub const WriteFileWindows = struct {
     }
 
     pub fn onOpen(req: *uv.fs_t) callconv(.C) void {
-        var this: *WriteFileWindows = @fieldParentPtr(WriteFileWindows, "io_request", req);
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
         bun.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
         const rc = this.io_request.result;
         if (comptime Environment.allow_assert)
@@ -492,7 +492,7 @@ pub const WriteFileWindows = struct {
     fn mkdirp(this: *WriteFileWindows) void {
         log("mkdirp", .{});
         this.mkdirp_if_not_exists = false;
-        this.loop().refConcurrently();
+        this.event_loop.refConcurrently();
 
         const path = this.file_blob.store.?.data.file.pathlike.path.slice();
         JSC.Node.Async.AsyncMkdirp.new(.{
@@ -505,11 +505,13 @@ pub const WriteFileWindows = struct {
     }
 
     fn onMkdirpComplete(this: *WriteFileWindows) void {
-        this.loop().unrefConcurrently();
+        this.event_loop.unrefConcurrently();
 
-        if (this.err) |err| {
-            this.throw(err);
-            bun.default_allocator.free(err.path);
+        const err = this.err;
+        this.err = null;
+        if (err) |err_| {
+            this.throw(err_);
+            bun.default_allocator.free(err_.path);
             return;
         }
 
@@ -524,7 +526,7 @@ pub const WriteFileWindows = struct {
     }
 
     fn onWriteComplete(req: *uv.fs_t) callconv(.C) void {
-        var this: *WriteFileWindows = @fieldParentPtr(WriteFileWindows, "io_request", req);
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
         bun.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
         const rc = this.io_request.result;
         if (rc.errno()) |err| {
@@ -540,7 +542,7 @@ pub const WriteFileWindows = struct {
     }
 
     pub fn onFinish(container: *WriteFileWindows) void {
-        container.loop().unrefConcurrently();
+        container.event_loop.unrefConcurrently();
         var event_loop = container.event_loop;
         event_loop.enter();
         defer event_loop.exit();
@@ -635,7 +637,7 @@ pub const WriteFileWindows = struct {
         bytes_blob: Blob,
         comptime Context: type,
         context: Context,
-        comptime callback: *const fn (ctx: Context, bytes: ResultType) void,
+        comptime callback: *const fn (ctx: Context, bytes: WriteFileResultType) void,
         mkdirp_if_not_exists: bool,
     ) *WriteFileWindows {
         return WriteFileWindows.createWithCtx(
@@ -652,7 +654,7 @@ pub const WriteFileWindows = struct {
 pub const WriteFilePromise = struct {
     promise: JSPromise.Strong = .{},
     globalThis: *JSGlobalObject,
-    pub fn run(handler: *@This(), count: Blob.WriteFile.ResultType) void {
+    pub fn run(handler: *@This(), count: WriteFileResultType) void {
         var promise = handler.promise.swap();
         const globalThis = handler.globalThis;
         bun.destroy(handler);
@@ -685,17 +687,17 @@ pub const WriteFileWaitFromLockedValueTask = struct {
         var globalThis = this.globalThis;
         var file_blob = this.file_blob;
         switch (value.*) {
-            .Error => |err| {
+            .Error => |*err_ref| {
                 file_blob.detach();
                 _ = value.use();
-                this.promise.strong.deinit();
+                this.promise.deinit();
                 bun.destroy(this);
-                promise.reject(globalThis, err);
+                promise.reject(globalThis, err_ref.toJS(globalThis));
             },
             .Used => {
                 file_blob.detach();
                 _ = value.use();
-                this.promise.strong.deinit();
+                this.promise.deinit();
                 bun.destroy(this);
                 promise.reject(globalThis, ZigString.init("Body was used after it was consumed").toErrorInstance(globalThis));
             },
@@ -707,27 +709,19 @@ pub const WriteFileWaitFromLockedValueTask = struct {
             => {
                 var blob = value.use();
                 // TODO: this should be one promise not two!
-                const new_promise = Blob.writeFileWithSourceDestination(globalThis, &blob, &file_blob, this.mkdirp_if_not_exists);
-                if (new_promise.asAnyPromise()) |_promise| {
-                    switch (_promise.status(globalThis.vm())) {
-                        .Pending => {
-                            // Fulfill the new promise using the old promise
-                            promise.resolve(
-                                globalThis,
-                                new_promise,
-                            );
-                        },
-                        .Rejected => {
-                            promise.reject(globalThis, _promise.result(globalThis.vm()));
-                        },
-                        else => {
-                            promise.resolve(globalThis, _promise.result(globalThis.vm()));
-                        },
+                const new_promise = Blob.writeFileWithSourceDestination(globalThis, &blob, &file_blob, .{ .mkdirp_if_not_exists = this.mkdirp_if_not_exists });
+                if (new_promise.asAnyPromise()) |p| {
+                    switch (p.unwrap(globalThis.vm(), .mark_handled)) {
+                        // Fulfill the new promise using the pending promise
+                        .pending => promise.resolve(globalThis, new_promise),
+
+                        .rejected => |err| promise.reject(globalThis, err),
+                        .fulfilled => |result| promise.resolve(globalThis, result),
                     }
                 }
 
                 file_blob.detach();
-                this.promise.strong.deinit();
+                this.promise.deinit();
                 bun.destroy(this);
             },
             .Locked => {

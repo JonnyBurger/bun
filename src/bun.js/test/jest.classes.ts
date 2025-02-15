@@ -297,6 +297,10 @@ export default [
         fn: "toHaveBeenCalled",
         length: 0,
       },
+      toHaveBeenCalledOnce: {
+        fn: "toHaveBeenCalledOnce",
+        length: 0,
+      },
       toHaveBeenCalledTimes: {
         fn: "toHaveBeenCalledTimes",
         length: 1,
@@ -419,8 +423,29 @@ export default [
         fn: "toContainKey",
         length: 1,
       },
+      toContainAllKeys: {
+        fn: "toContainAllKeys",
+        length: 1,
+      },
       toContainAnyKeys: {
         fn: "toContainAnyKeys",
+        length: 1,
+      },
+      toContainValue: {
+        fn: "toContainValue",
+        length: 1,
+      },
+      toContainValues: {
+        fn: "toContainValues",
+        length: 1,
+      },
+      toContainAllValues: {
+        fn: "toContainAllValues",
+        length: 1,
+      },
+      toContainAnyValues: {
+        fn: "toContainAnyValues",
+        length: 1,
       },
       toContainKeys: {
         fn: "toContainKeys",

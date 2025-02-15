@@ -10,9 +10,11 @@ export default [
     estimatedSize: true,
     configurable: false,
     overridesToJS: true,
+    memoryCost: true,
     proto: {
       text: { fn: "getText" },
       json: { fn: "getJSON" },
+      bytes: { fn: "getBytes" },
       body: { getter: "getBody", cache: true },
       arrayBuffer: { fn: "getArrayBuffer" },
       formData: { fn: "getFormData" },
@@ -90,6 +92,7 @@ export default [
 
       text: { fn: "getText" },
       json: { fn: "getJSON" },
+      bytes: { fn: "getBytes" },
       arrayBuffer: { fn: "getArrayBuffer" },
       blob: { fn: "getBlob" },
       clone: { fn: "doClone", length: 1 },
@@ -122,6 +125,7 @@ export default [
   }),
   define({
     name: "Blob",
+    final: false,
     construct: true,
     finalize: true,
     JSType: "0b11101110",
@@ -140,6 +144,9 @@ export default [
       formData: { fn: "getFormData" },
       exists: { fn: "getExists", length: 0 },
 
+      // Non-standard, but consistent!
+      bytes: { fn: "getBytes" },
+
       type: {
         getter: "getType",
       },
@@ -147,8 +154,10 @@ export default [
       // TODO: Move this to a separate `File` object or BunFile
       // This is *not* spec-compliant.
       name: {
-        getter: "getName",
+        this: true,
         cache: true,
+        getter: "getName",
+        setter: "setName",
       },
 
       // TODO: Move this to a separate `File` object or BunFile
@@ -157,9 +166,14 @@ export default [
         getter: "getLastModified",
       },
 
+      // Non-standard, s3 + BunFile support
+      unlink: { fn: "doUnlink", length: 0 },
+      delete: { fn: "doUnlink", length: 0 },
+      write: { fn: "doWrite", length: 2 },
       size: {
         getter: "getSize",
       },
+      stat: { fn: "getStat", length: 0 },
 
       writer: {
         fn: "getWriter",

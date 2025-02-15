@@ -1,12 +1,11 @@
 // https://github.com/oven-sh/bun/issues/3216
-import { test, expect } from "bun:test";
-import { tmpdir } from "os";
-import { mkdtempSync, writeFileSync } from "fs";
+import { expect, test } from "bun:test";
+import { writeFileSync } from "fs";
+import { bunEnv, bunExe, tmpdirSync } from "harness";
 import { join } from "path";
-import { bunEnv, bunExe } from "harness";
 
 test("runtime directory caching gets invalidated", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "bun-test-"));
+  const tmp = tmpdirSync();
   writeFileSync(
     join(tmp, "index.ts"),
     `const file = \`\${import.meta.dir}/temp.mjs\`;

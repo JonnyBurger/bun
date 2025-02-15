@@ -1,12 +1,17 @@
-import { ServerWebSocket, TCPSocket, Socket as _BunSocket, TCPSocketListener } from "bun";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { connect, isIP, isIPv4, isIPv6, Socket, createConnection } from "net";
-import { realpathSync, mkdtempSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { bunEnv, bunExe } from "harness";
+import { Socket as _BunSocket, TCPSocketListener } from "bun";
+import { heapStats } from "bun:jsc";
+import { describe, expect, it } from "bun:test";
+import { bunEnv, bunExe, expectMaxObjectTypeCount, isWindows, tmpdirSync } from "harness";
+import { randomUUID } from "node:crypto";
+import { connect, createConnection, createServer, isIP, isIPv4, isIPv6, Server, Socket, Stream } from "node:net";
+import { join } from "node:path";
 
-const socket_domain = mkdtempSync(join(realpathSync(tmpdir()), "node-net"));
+const socket_domain = tmpdirSync();
+
+it("Stream should be aliased to Socket", () => {
+  // https://github.com/nodejs/node/blob/2eff28fb7a93d3f672f80b582f664a7c701569fb/lib/net.js#L2456
+  expect(Socket).toBe(Stream);
+});
 
 it("should support net.isIP()", () => {
   expect(isIP("::1")).toBe(6);
@@ -35,7 +40,7 @@ it("should support net.isIPv6()", () => {
 describe("net.Socket read", () => {
   var unix_servers = 0;
   for (let [message, label] of [
-    // ["Hello World!".repeat(1024), "long message"],
+    ["Hello World!".repeat(1024), "long message"],
     ["Hello!", "short message"],
   ]) {
     describe(label, () => {
@@ -253,6 +258,36 @@ describe("net.Socket read", () => {
             .on("error", done);
         }, socket_domain),
       );
+
+      it(
+        "should support onread callback",
+        runWithServer((server, drain, done) => {
+          var data = "";
+          const options = {
+            host: server.hostname,
+            port: server.port,
+            onread: {
+              buffer: Buffer.alloc(4096),
+              callback: (size, buf) => {
+                data += buf.slice(0, size).toString("utf8");
+              },
+            },
+          };
+          const socket = createConnection(options, () => {
+            expect(socket).toBeDefined();
+            expect(socket.connecting).toBe(false);
+          })
+            .on("end", () => {
+              try {
+                expect(data).toBe(message);
+                done();
+              } catch (e) {
+                done(e);
+              }
+            })
+            .on("error", done);
+        }),
+      );
     });
   }
 });
@@ -354,6 +389,34 @@ describe("net.Socket write", () => {
       socket.end();
     }),
   );
+
+  it("should allow reconnecting after end()", async () => {
+    const server = new Server(socket => socket.end());
+    const port = await new Promise(resolve => {
+      server.once("listening", () => resolve(server.address().port));
+      server.listen();
+    });
+
+    const socket = new Socket();
+    socket.on("data", data => console.log(data.toString()));
+    socket.on("error", err => console.error(err));
+
+    async function run() {
+      return new Promise((resolve, reject) => {
+        socket.once("connect", (...args) => {
+          socket.write("script\n", err => {
+            if (err) return reject(err);
+            socket.end(() => setTimeout(resolve, 3));
+          });
+        });
+        socket.connect(port, "127.0.0.1");
+      });
+    }
+
+    for (let i = 0; i < 10; i++) {
+      await run();
+    }
+  });
 });
 
 it("should handle connection error", done => {
@@ -434,3 +497,156 @@ it("socket should keep process alive if unref is not called", async () => {
   });
   expect(await process.exited).toBe(1);
 });
+
+it("should not hang after FIN", async () => {
+  const net = require("node:net");
+  const { promise: listening, resolve: resolveListening, reject } = Promise.withResolvers();
+  const server = net.createServer(c => {
+    c.write("Hello client");
+    c.end();
+  });
+  try {
+    server.on("error", reject);
+    server.listen(0, () => {
+      resolveListening(server.address().port);
+    });
+    const process = Bun.spawn({
+      cmd: [bunExe(), join(import.meta.dir, "node-fin-fixture.js")],
+      stderr: "inherit",
+      stdin: "ignore",
+      stdout: "inherit",
+      env: {
+        ...bunEnv,
+        PORT: ((await listening) as number).toString(),
+      },
+    });
+    const timeout = setTimeout(() => {
+      process.kill();
+      reject(new Error("Timeout"));
+    }, 1000);
+    expect(await process.exited).toBe(0);
+    clearTimeout(timeout);
+  } finally {
+    server.close();
+  }
+});
+
+it("should not hang after destroy", async () => {
+  const net = require("node:net");
+  const { promise: listening, resolve: resolveListening, reject } = Promise.withResolvers();
+  const server = net.createServer(c => {
+    c.write("Hello client");
+  });
+  try {
+    server.on("error", reject);
+    server.listen(0, () => {
+      resolveListening(server.address().port);
+    });
+    const process = Bun.spawn({
+      cmd: [bunExe(), join(import.meta.dir, "node-destroy-fixture.js")],
+      stderr: "inherit",
+      stdin: "ignore",
+      stdout: "inherit",
+      env: {
+        ...bunEnv,
+        PORT: ((await listening) as number).toString(),
+      },
+    });
+    const timeout = setTimeout(() => {
+      process.kill();
+      reject(new Error("Timeout"));
+    }, 1000);
+    expect(await process.exited).toBe(0);
+    clearTimeout(timeout);
+  } finally {
+    server.close();
+  }
+});
+
+it("should trigger error when aborted even if connection failed #13126", async () => {
+  const signal = AbortSignal.timeout(100);
+  const socket = createConnection({
+    host: "example.com",
+    port: 999,
+    signal: signal,
+  });
+  const { promise, resolve, reject } = Promise.withResolvers();
+
+  socket.on("connect", reject);
+  socket.on("error", resolve);
+
+  const err = (await promise) as Error;
+  expect(err.name).toBe("TimeoutError");
+});
+
+it("should trigger error when aborted even if connection failed, and the signal is already aborted #13126", async () => {
+  const signal = AbortSignal.timeout(1);
+  await Bun.sleep(10);
+  const socket = createConnection({
+    host: "example.com",
+    port: 999,
+    signal: signal,
+  });
+  const { promise, resolve, reject } = Promise.withResolvers();
+
+  socket.on("connect", reject);
+  socket.on("error", resolve);
+
+  const err = (await promise) as Error;
+  expect(err.name).toBe("TimeoutError");
+});
+
+it.if(isWindows)(
+  "should work with named pipes",
+  async () => {
+    async function test(pipe_name: string) {
+      const { promise: messageReceived, resolve: resolveMessageReceived } = Promise.withResolvers();
+      const { promise: clientReceived, resolve: resolveClientReceived } = Promise.withResolvers();
+      let client: ReturnType<typeof connect> | null = null;
+      let server: ReturnType<typeof createServer> | null = null;
+      try {
+        server = createServer(socket => {
+          socket.on("data", data => {
+            const message = data.toString();
+            socket.end("Goodbye World!");
+            resolveMessageReceived(message);
+          });
+        });
+
+        server.listen(pipe_name);
+        client = connect(pipe_name).on("data", data => {
+          const message = data.toString();
+          resolveClientReceived(message);
+        });
+
+        client?.write("Hello World!");
+        const message = await messageReceived;
+        expect(message).toBe("Hello World!");
+        const client_message = await clientReceived;
+        expect(client_message).toBe("Goodbye World!");
+      } finally {
+        client?.destroy();
+        server?.close();
+      }
+    }
+
+    const batch = [];
+    const before = heapStats().objectTypeCounts.TLSSocket || 0;
+    for (let i = 0; i < 100; i++) {
+      batch.push(test(`\\\\.\\pipe\\test\\${randomUUID()}`));
+      batch.push(test(`\\\\?\\pipe\\test\\${randomUUID()}`));
+      batch.push(test(`//?/pipe/test/${randomUUID()}`));
+      batch.push(test(`//./pipe/test/${randomUUID()}`));
+      batch.push(test(`/\\./pipe/test/${randomUUID()}`));
+      batch.push(test(`/\\./pipe\\test/${randomUUID()}`));
+      batch.push(test(`\\/.\\pipe/test\\${randomUUID()}`));
+      if (i % 50 === 0) {
+        await Promise.all(batch);
+        batch.length = 0;
+      }
+    }
+    await Promise.all(batch);
+    expectMaxObjectTypeCount(expect, "TCPSocket", before);
+  },
+  20_000,
+);

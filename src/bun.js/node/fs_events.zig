@@ -1,7 +1,7 @@
 const std = @import("std");
 const bun = @import("root").bun;
 const Environment = bun.Environment;
-const Mutex = @import("../../lock.zig").Lock;
+const Mutex = bun.Mutex;
 const sync = @import("../../sync.zig");
 const Semaphore = sync.Semaphore;
 const UnboundedQueue = @import("../unbounded_queue.zig").UnboundedQueue;
@@ -79,13 +79,6 @@ pub const kFSEventStreamEventFlagRootChanged: c_int = 32;
 pub const kFSEventStreamEventFlagUnmount: c_int = 128;
 pub const kFSEventStreamEventFlagUserDropped: c_int = 2;
 
-// Lazy function call binding.
-const RTLD_LAZY = 0x1;
-// Symbols exported from this image (dynamic library or bundle)
-// are generally hidden and only availble to dlsym() when
-// directly using the handle returned by this call to dlopen().
-const RTLD_LOCAL = 0x4;
-
 pub const kFSEventsModified: c_int =
     kFSEventStreamEventFlagItemChangeOwner |
     kFSEventStreamEventFlagItemFinderInfoMod |
@@ -107,8 +100,8 @@ pub const kFSEventsSystem: c_int =
     kFSEventStreamEventFlagUnmount |
     kFSEventStreamEventFlagRootChanged;
 
-var fsevents_mutex: Mutex = Mutex.init();
-var fsevents_default_loop_mutex: Mutex = Mutex.init();
+var fsevents_mutex: Mutex = .{};
+var fsevents_default_loop_mutex: Mutex = .{};
 var fsevents_default_loop: ?*FSEventsLoop = null;
 
 fn dlsym(handle: ?*anyopaque, comptime Type: type, comptime symbol: [:0]const u8) ?Type {
@@ -191,7 +184,7 @@ var fsevents_cf: ?CoreFoundation = null;
 var fsevents_cs: ?CoreServices = null;
 
 fn InitLibrary() void {
-    const fsevents_cf_handle = bun.C.dlopen("/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", RTLD_LAZY | RTLD_LOCAL);
+    const fsevents_cf_handle = bun.C.dlopen("/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", .{ .LAZY = true, .LOCAL = true });
     if (fsevents_cf_handle == null) @panic("Cannot Load CoreFoundation");
 
     fsevents_cf = CoreFoundation{
@@ -210,7 +203,7 @@ fn InitLibrary() void {
         .RunLoopDefaultMode = dlsym(fsevents_cf_handle, *CFStringRef, "kCFRunLoopDefaultMode") orelse @panic("Cannot Load CoreFoundation"),
     };
 
-    const fsevents_cs_handle = bun.C.dlopen("/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices", RTLD_LAZY | RTLD_LOCAL);
+    const fsevents_cs_handle = bun.C.dlopen("/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices", .{ .LAZY = true, .LOCAL = true });
     if (fsevents_cs_handle == null) @panic("Cannot Load CoreServices");
 
     fsevents_cs = CoreServices{
@@ -331,7 +324,7 @@ pub const FSEventsLoop = struct {
             return error.FailedToCreateCoreFoudationSourceLoop;
         }
 
-        const fs_loop = FSEventsLoop{ .sem = Semaphore.init(0), .mutex = Mutex.init(), .signal_source = signal_source };
+        const fs_loop = FSEventsLoop{ .sem = Semaphore.init(0), .mutex = .{}, .signal_source = signal_source };
 
         this.* = fs_loop;
         this.thread = try std.Thread.spawn(.{}, FSEventsLoop.CFThreadLoop, .{this});
@@ -374,23 +367,19 @@ pub const FSEventsLoop = struct {
                         path = path[handle_path.len..];
 
                         // Ignore events with path equal to directory itself
-                        if (path.len <= 1 and is_file) {
+                        if (path.len <= 1 and !is_file) {
                             continue;
                         }
-                        if (path.len == 0) {
-                            // Since we're using fsevents to watch the file itself, path == handle_path, and we now need to get the basename of the file back
-                            while (path.len > 0) {
-                                if (bun.strings.startsWithChar(path, '/')) {
-                                    path = path[1..];
-                                    break;
-                                } else {
-                                    path = path[1..];
-                                }
-                            }
 
+                        if (path.len == 0) {
+                            // Since we're using fsevents to watch the file itself handle_path == path, and we now need to get the basename of the file back
+                            const basename = bun.strings.lastIndexOfChar(handle_path, '/') orelse handle_path.len;
+                            path = handle_path[basename..];
                             // Created and Removed seem to be always set, but don't make sense
                             flags &= ~kFSEventsRenamed;
-                        } else {
+                        }
+
+                        if (bun.strings.startsWithChar(path, '/')) {
                             // Skip forward slash
                             path = path[1..];
                         }

@@ -1,7 +1,7 @@
-import { expect, it, beforeAll, afterAll } from "bun:test";
-import { join } from "path";
 import type { Subprocess } from "bun";
+import { afterAll, beforeAll, expect, it } from "bun:test";
 import type { IncomingMessage } from "http";
+import { join } from "path";
 let url: URL;
 let process: Subprocess<"ignore", "pipe", "ignore"> | null = null;
 beforeAll(async () => {
@@ -49,7 +49,7 @@ it("allow renegotiation in https module", async () => {
       path: url.pathname,
       method: "GET",
       keepalive: false,
-      tls: { rejectUnauthorized: false },
+      rejectUnauthorized: false,
     },
     (res: IncomingMessage) => {
       res.setEncoding("utf8");
@@ -79,7 +79,7 @@ it("should fail if renegotiation fails using https", async () => {
       path: url.pathname,
       method: "GET",
       keepalive: false,
-      tls: { rejectUnauthorized: true },
+      rejectUnauthorized: true,
     },
     (res: IncomingMessage) => {
       res.setEncoding("utf8");

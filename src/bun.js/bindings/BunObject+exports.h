@@ -1,3 +1,4 @@
+#pragma once
 // clang-format off
 
 // --- Getters ---
@@ -14,7 +15,6 @@
     macro(SHA384) \
     macro(SHA512) \
     macro(SHA512_256) \
-    macro(ShellInterpreter) \
     macro(TOML) \
     macro(Transpiler) \
     macro(argv) \
@@ -30,6 +30,9 @@
     macro(stdout) \
     macro(unsafe) \
     macro(semver) \
+    macro(embeddedFiles) \
+    macro(S3Client) \
+    macro(s3) \
 
 // --- Callbacks ---
 #define FOR_EACH_CALLBACK(macro) \
@@ -37,6 +40,7 @@
     macro(braces) \
     macro(build) \
     macro(connect) \
+    macro(color) \
     macro(deflateSync) \
     macro(file) \
     macro(fs) \
@@ -65,16 +69,18 @@
     macro(write) \
     macro(stringWidth) \
     macro(shellEscape) \
+    macro(createShellInterpreter) \
+    macro(createParsedShellScript) \
 
-#define DECLARE_ZIG_BUN_OBJECT_CALLBACK(name) extern "C" JSC::EncodedJSValue BunObject_callback_##name(JSC::JSGlobalObject*, JSC::CallFrame*);
+#define DECLARE_ZIG_BUN_OBJECT_CALLBACK(name) BUN_DECLARE_HOST_FUNCTION(BunObject_callback_##name);
 FOR_EACH_CALLBACK(DECLARE_ZIG_BUN_OBJECT_CALLBACK);
 #undef DECLARE_ZIG_BUN_OBJECT_CALLBACK
 
-#define DECLARE_ZIG_BUN_OBJECT_GETTER(name) extern "C" JSC::EncodedJSValue BunObject_getter_##name(JSC::JSGlobalObject*, JSC::JSObject*);
+#define DECLARE_ZIG_BUN_OBJECT_GETTER(name) extern "C" JSC::EncodedJSValue SYSV_ABI BunObject_getter_##name(JSC::JSGlobalObject*, JSC::JSObject*);
 FOR_EACH_GETTER(DECLARE_ZIG_BUN_OBJECT_GETTER);
 #undef DECLARE_ZIG_BUN_OBJECT_GETTER
 
-#define DEFINE_ZIG_BUN_OBJECT_GETTER_WRAPPER(name) JSC::JSValue BunObject_getter_wrap_##name(JSC::VM &vm, JSC::JSObject *object) { \
+#define DEFINE_ZIG_BUN_OBJECT_GETTER_WRAPPER(name) static JSC::JSValue BunObject_getter_wrap_##name(JSC::VM &vm, JSC::JSObject *object) { \
     return JSC::JSValue::decode(BunObject_getter_##name(object->globalObject(), object)); \
 } \
 

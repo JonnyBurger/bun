@@ -1,5 +1,6 @@
 const std = @import("std");
 const bun = @import("root").bun;
+pub extern "c" fn memmem(haystack: [*]const u8, haystacklen: usize, needle: [*]const u8, needlelen: usize) ?[*]const u8;
 pub const SystemErrno = enum(u8) {
     SUCCESS = 0,
     EPERM = 1,
@@ -151,150 +152,79 @@ pub const SystemErrno = enum(u8) {
         if (code >= max) return null;
         return @enumFromInt(code);
     }
-
-    pub fn label(this: SystemErrno) ?[]const u8 {
-        return labels.get(this) orelse null;
-    }
-
-    const LabelMap = std.EnumMap(SystemErrno, []const u8);
-    pub const labels: LabelMap = brk: {
-        var map: LabelMap = LabelMap.initFull("");
-
-        map.put(.EPERM, "Operation not permitted");
-        map.put(.ENOENT, "No such file or directory");
-        map.put(.ESRCH, "No such process");
-        map.put(.EINTR, "Interrupted system call");
-        map.put(.EIO, "I/O error");
-        map.put(.ENXIO, "No such device or address");
-        map.put(.E2BIG, "Argument list too long");
-        map.put(.ENOEXEC, "Exec format error");
-        map.put(.EBADF, "Bad file descriptor");
-        map.put(.ECHILD, "No child processes");
-        map.put(.EAGAIN, "Try again");
-        map.put(.ENOMEM, "Out of memory");
-        map.put(.EACCES, "Permission denied");
-        map.put(.EFAULT, "Bad address");
-        map.put(.ENOTBLK, "Block device required");
-        map.put(.EBUSY, "Device or resource busy");
-        map.put(.EEXIST, "File or folder exists");
-        map.put(.EXDEV, "Cross-device link");
-        map.put(.ENODEV, "No such device");
-        map.put(.ENOTDIR, "Not a directory");
-        map.put(.EISDIR, "Is a directory");
-        map.put(.EINVAL, "Invalid argument");
-        map.put(.ENFILE, "File table overflow");
-        map.put(.EMFILE, "Too many open files");
-        map.put(.ENOTTY, "Not a typewriter");
-        map.put(.ETXTBSY, "Text file busy");
-        map.put(.EFBIG, "File too large");
-        map.put(.ENOSPC, "No space left on device");
-        map.put(.ESPIPE, "Illegal seek");
-        map.put(.EROFS, "Read-only file system");
-        map.put(.EMLINK, "Too many links");
-        map.put(.EPIPE, "Broken pipe");
-        map.put(.EDOM, "Math argument out of domain of func");
-        map.put(.ERANGE, "Math result not representable");
-        map.put(.EDEADLK, "Resource deadlock would occur");
-        map.put(.ENAMETOOLONG, "File name too long");
-        map.put(.ENOLCK, "No record locks available");
-        map.put(.ENOSYS, "Function not implemented");
-        map.put(.ENOTEMPTY, "Directory not empty");
-        map.put(.ELOOP, "Too many symbolic links encountered");
-        map.put(.ENOMSG, "No message of desired type");
-        map.put(.EIDRM, "Identifier removed");
-        map.put(.ECHRNG, "Channel number out of range");
-        map.put(.EL2NSYNC, "Level 2 not synchronized");
-        map.put(.EL3HLT, "Level 3 halted");
-        map.put(.EL3RST, "Level 3 reset");
-        map.put(.ELNRNG, "Link number out of range");
-        map.put(.EUNATCH, "Protocol driver not attached");
-        map.put(.ENOCSI, "No CSI structure available");
-        map.put(.EL2HLT, "Level 2 halted");
-        map.put(.EBADE, "Invalid exchange");
-        map.put(.EBADR, "Invalid request descriptor");
-        map.put(.EXFULL, "Exchange full");
-        map.put(.ENOANO, "No anode");
-        map.put(.EBADRQC, "Invalid request code");
-        map.put(.EBADSLT, "Invalid slot");
-        map.put(.EBFONT, "Bad font file format");
-        map.put(.ENOSTR, "Device not a stream");
-        map.put(.ENODATA, "No data available");
-        map.put(.ETIME, "Timer expired");
-        map.put(.ENOSR, "Out of streams resources");
-        map.put(.ENONET, "Machine is not on the network");
-        map.put(.ENOPKG, "Package not installed");
-        map.put(.EREMOTE, "Object is remote");
-        map.put(.ENOLINK, "Link has been severed");
-        map.put(.EADV, "Advertise error");
-        map.put(.ESRMNT, "Srmount error");
-        map.put(.ECOMM, "Communication error on send");
-        map.put(.EPROTO, "Protocol error");
-        map.put(.EMULTIHOP, "Multihop attempted");
-        map.put(.EDOTDOT, "RFS specific error");
-        map.put(.EBADMSG, "Not a data message");
-        map.put(.EOVERFLOW, "Value too large for defined data type");
-        map.put(.ENOTUNIQ, "Name not unique on network");
-        map.put(.EBADFD, "File descriptor in bad state");
-        map.put(.EREMCHG, "Remote address changed");
-        map.put(.ELIBACC, "Can not access a needed shared library");
-        map.put(.ELIBBAD, "Accessing a corrupted shared library");
-        map.put(.ELIBSCN, "lib section in a.out corrupted");
-        map.put(.ELIBMAX, "Attempting to link in too many shared libraries");
-        map.put(.ELIBEXEC, "Cannot exec a shared library directly");
-        map.put(.EILSEQ, "Illegal byte sequence");
-        map.put(.ERESTART, "Interrupted system call should be restarted");
-        map.put(.ESTRPIPE, "Streams pipe error");
-        map.put(.EUSERS, "Too many users");
-        map.put(.ENOTSOCK, "Socket operation on non-socket");
-        map.put(.EDESTADDRREQ, "Destination address required");
-        map.put(.EMSGSIZE, "Message too long");
-        map.put(.EPROTOTYPE, "Protocol wrong type for socket");
-        map.put(.ENOPROTOOPT, "Protocol not available");
-        map.put(.EPROTONOSUPPORT, "Protocol not supported");
-        map.put(.ESOCKTNOSUPPORT, "Socket type not supported");
-        map.put(.ENOTSUP, "Operation not supported on transport endpoint");
-        map.put(.EPFNOSUPPORT, "Protocol family not supported");
-        map.put(.EAFNOSUPPORT, "Address family not supported by protocol");
-        map.put(.EADDRINUSE, "Address already in use");
-        map.put(.EADDRNOTAVAIL, "Cannot assign requested address");
-        map.put(.ENETDOWN, "Network is down");
-        map.put(.ENETUNREACH, "Network is unreachable");
-        map.put(.ENETRESET, "Network dropped connection because of reset");
-        map.put(.ECONNABORTED, "Software caused connection abort");
-        map.put(.ECONNRESET, "Connection reset by peer");
-        map.put(.ENOBUFS, "No buffer space available");
-        map.put(.EISCONN, "Transport endpoint is already connected");
-        map.put(.ENOTCONN, "Transport endpoint is not connected");
-        map.put(.ESHUTDOWN, "Cannot send after transport endpoint shutdown");
-        map.put(.ETOOMANYREFS, "Too many references: cannot splice");
-        map.put(.ETIMEDOUT, "Connection timed out");
-        map.put(.ECONNREFUSED, "Connection refused");
-        map.put(.EHOSTDOWN, "Host is down");
-        map.put(.EHOSTUNREACH, "No route to host");
-        map.put(.EALREADY, "Operation already in progress");
-        map.put(.EINPROGRESS, "Operation now in progress");
-        map.put(.ESTALE, "Stale NFS file handle");
-        map.put(.EUCLEAN, "Structure needs cleaning");
-        map.put(.ENOTNAM, "Not a XENIX named type file");
-        map.put(.ENAVAIL, "No XENIX semaphores available");
-        map.put(.EISNAM, "Is a named type file");
-        map.put(.EREMOTEIO, "Remote I/O error");
-        map.put(.EDQUOT, "Quota exceeded");
-        map.put(.ENOMEDIUM, "No medium found");
-        map.put(.EMEDIUMTYPE, "Wrong medium type");
-        map.put(.ECANCELED, "Operation Canceled");
-        map.put(.ENOKEY, "Required key not available");
-        map.put(.EKEYEXPIRED, "Key has expired");
-        map.put(.EKEYREVOKED, "Key has been revoked");
-        map.put(.EKEYREJECTED, "Key was rejected by service");
-        map.put(.EOWNERDEAD, "Owner died");
-        map.put(.ENOTRECOVERABLE, "State not recoverable");
-        break :brk map;
-    };
 };
 
+pub const UV_E2BIG: i32 = @intFromEnum(SystemErrno.E2BIG);
+pub const UV_EACCES: i32 = @intFromEnum(SystemErrno.EACCES);
+pub const UV_EADDRINUSE: i32 = @intFromEnum(SystemErrno.EADDRINUSE);
+pub const UV_EADDRNOTAVAIL: i32 = @intFromEnum(SystemErrno.EADDRNOTAVAIL);
+pub const UV_EAFNOSUPPORT: i32 = @intFromEnum(SystemErrno.EAFNOSUPPORT);
+pub const UV_EAGAIN: i32 = @intFromEnum(SystemErrno.EAGAIN);
+pub const UV_EALREADY: i32 = @intFromEnum(SystemErrno.EALREADY);
+pub const UV_EBADF: i32 = @intFromEnum(SystemErrno.EBADF);
+pub const UV_EBUSY: i32 = @intFromEnum(SystemErrno.EBUSY);
+pub const UV_ECANCELED: i32 = @intFromEnum(SystemErrno.ECANCELED);
+pub const UV_ECHARSET: i32 = -bun.windows.libuv.UV_ECHARSET;
+pub const UV_ECONNABORTED: i32 = @intFromEnum(SystemErrno.ECONNABORTED);
+pub const UV_ECONNREFUSED: i32 = @intFromEnum(SystemErrno.ECONNREFUSED);
+pub const UV_ECONNRESET: i32 = @intFromEnum(SystemErrno.ECONNRESET);
+pub const UV_EDESTADDRREQ: i32 = @intFromEnum(SystemErrno.EDESTADDRREQ);
+pub const UV_EEXIST: i32 = @intFromEnum(SystemErrno.EEXIST);
+pub const UV_EFAULT: i32 = @intFromEnum(SystemErrno.EFAULT);
+pub const UV_EHOSTUNREACH: i32 = @intFromEnum(SystemErrno.EHOSTUNREACH);
+pub const UV_EINTR: i32 = @intFromEnum(SystemErrno.EINTR);
+pub const UV_EINVAL: i32 = @intFromEnum(SystemErrno.EINVAL);
+pub const UV_EIO: i32 = @intFromEnum(SystemErrno.EIO);
+pub const UV_EISCONN: i32 = @intFromEnum(SystemErrno.EISCONN);
+pub const UV_EISDIR: i32 = @intFromEnum(SystemErrno.EISDIR);
+pub const UV_ELOOP: i32 = @intFromEnum(SystemErrno.ELOOP);
+pub const UV_EMFILE: i32 = @intFromEnum(SystemErrno.EMFILE);
+pub const UV_EMSGSIZE: i32 = @intFromEnum(SystemErrno.EMSGSIZE);
+pub const UV_ENAMETOOLONG: i32 = @intFromEnum(SystemErrno.ENAMETOOLONG);
+pub const UV_ENETDOWN: i32 = @intFromEnum(SystemErrno.ENETDOWN);
+pub const UV_ENETUNREACH: i32 = @intFromEnum(SystemErrno.ENETUNREACH);
+pub const UV_ENFILE: i32 = @intFromEnum(SystemErrno.ENFILE);
+pub const UV_ENOBUFS: i32 = @intFromEnum(SystemErrno.ENOBUFS);
+pub const UV_ENODEV: i32 = @intFromEnum(SystemErrno.ENODEV);
+pub const UV_ENOENT: i32 = @intFromEnum(SystemErrno.ENOENT);
+pub const UV_ENOMEM: i32 = @intFromEnum(SystemErrno.ENOMEM);
+pub const UV_ENONET: i32 = @intFromEnum(SystemErrno.ENONET);
+pub const UV_ENOSPC: i32 = @intFromEnum(SystemErrno.ENOSPC);
+pub const UV_ENOSYS: i32 = @intFromEnum(SystemErrno.ENOSYS);
+pub const UV_ENOTCONN: i32 = @intFromEnum(SystemErrno.ENOTCONN);
+pub const UV_ENOTDIR: i32 = @intFromEnum(SystemErrno.ENOTDIR);
+pub const UV_ENOTEMPTY: i32 = @intFromEnum(SystemErrno.ENOTEMPTY);
+pub const UV_ENOTSOCK: i32 = @intFromEnum(SystemErrno.ENOTSOCK);
+pub const UV_ENOTSUP: i32 = @intFromEnum(SystemErrno.ENOTSUP);
+pub const UV_EPERM: i32 = @intFromEnum(SystemErrno.EPERM);
+pub const UV_EPIPE: i32 = @intFromEnum(SystemErrno.EPIPE);
+pub const UV_EPROTO: i32 = @intFromEnum(SystemErrno.EPROTO);
+pub const UV_EPROTONOSUPPORT: i32 = @intFromEnum(SystemErrno.EPROTONOSUPPORT);
+pub const UV_EPROTOTYPE: i32 = @intFromEnum(SystemErrno.EPROTOTYPE);
+pub const UV_EROFS: i32 = @intFromEnum(SystemErrno.EROFS);
+pub const UV_ESHUTDOWN: i32 = @intFromEnum(SystemErrno.ESHUTDOWN);
+pub const UV_ESPIPE: i32 = @intFromEnum(SystemErrno.ESPIPE);
+pub const UV_ESRCH: i32 = @intFromEnum(SystemErrno.ESRCH);
+pub const UV_ETIMEDOUT: i32 = @intFromEnum(SystemErrno.ETIMEDOUT);
+pub const UV_ETXTBSY: i32 = @intFromEnum(SystemErrno.ETXTBSY);
+pub const UV_EXDEV: i32 = @intFromEnum(SystemErrno.EXDEV);
+pub const UV_EFBIG: i32 = @intFromEnum(SystemErrno.EFBIG);
+pub const UV_ENOPROTOOPT: i32 = @intFromEnum(SystemErrno.ENOPROTOOPT);
+pub const UV_ERANGE: i32 = @intFromEnum(SystemErrno.ERANGE);
+pub const UV_ENXIO: i32 = @intFromEnum(SystemErrno.ENXIO);
+pub const UV_EMLINK: i32 = @intFromEnum(SystemErrno.EMLINK);
+pub const UV_EHOSTDOWN: i32 = @intFromEnum(SystemErrno.EHOSTDOWN);
+pub const UV_EREMOTEIO: i32 = @intFromEnum(SystemErrno.EREMOTEIO);
+pub const UV_ENOTTY: i32 = @intFromEnum(SystemErrno.ENOTTY);
+pub const UV_EFTYPE: i32 = -bun.windows.libuv.UV_EFTYPE;
+pub const UV_EILSEQ: i32 = @intFromEnum(SystemErrno.EILSEQ);
+pub const UV_EOVERFLOW: i32 = @intFromEnum(SystemErrno.EOVERFLOW);
+pub const UV_ESOCKTNOSUPPORT: i32 = @intFromEnum(SystemErrno.ESOCKTNOSUPPORT);
+pub const UV_ENODATA: i32 = @intFromEnum(SystemErrno.ENODATA);
+pub const UV_EUNATCH: i32 = @intFromEnum(SystemErrno.EUNATCH);
+
 pub const preallocate_length = 2048 * 1024;
-pub fn preallocate_file(fd: std.os.fd_t, offset: std.os.off_t, len: std.os.off_t) anyerror!void {
+pub fn preallocate_file(fd: std.posix.fd_t, offset: std.posix.off_t, len: std.posix.off_t) anyerror!void {
     // https://gist.github.com/Jarred-Sumner/b37b93399b63cbfd86e908c59a0a37df
     //  ext4 NVME Linux kernel 5.17.0-1016-oem x86_64
     //
@@ -382,7 +312,7 @@ pub fn preallocate_file(fd: std.os.fd_t, offset: std.os.off_t, len: std.os.off_t
 /// transfers up to len bytes of data from the file descriptor fd_in
 /// to the file descriptor fd_out, where one of the file descriptors
 /// must refer to a pipe.
-pub fn splice(fd_in: std.os.fd_t, off_in: ?*i64, fd_out: std.os.fd_t, off_out: ?*i64, len: usize, flags: u32) usize {
+pub fn splice(fd_in: std.posix.fd_t, off_in: ?*i64, fd_out: std.posix.fd_t, off_out: ?*i64, len: usize, flags: u32) usize {
     return std.os.linux.syscall6(
         .splice,
         @as(usize, @bitCast(@as(isize, fd_in))),
@@ -448,7 +378,7 @@ pub fn getSystemLoadavg() [3]f64 {
 }
 
 pub fn get_version(name_buffer: *[bun.HOST_NAME_MAX]u8) []const u8 {
-    const uts = std.os.uname();
+    const uts = std.posix.uname();
     const result = bun.sliceTo(&uts.version, 0);
     bun.copy(u8, name_buffer, result);
 
@@ -456,7 +386,7 @@ pub fn get_version(name_buffer: *[bun.HOST_NAME_MAX]u8) []const u8 {
 }
 
 pub fn get_release(name_buffer: *[bun.HOST_NAME_MAX]u8) []const u8 {
-    const uts = std.os.uname();
+    const uts = std.posix.uname();
     const result = bun.sliceTo(&uts.release, 0);
     bun.copy(u8, name_buffer, result);
 
@@ -475,11 +405,11 @@ pub const POSIX_SPAWN = struct {
     pub const SETSID = 0x80;
 };
 
-const fd_t = std.os.fd_t;
-const pid_t = std.os.pid_t;
-const mode_t = std.os.mode_t;
+const fd_t = std.posix.fd_t;
+const pid_t = std.posix.pid_t;
+const mode_t = std.posix.mode_t;
 const sigset_t = std.c.sigset_t;
-const sched_param = std.os.sched_param;
+const sched_param = std.posix.sched_param;
 
 pub const posix_spawnattr_t = extern struct {
     __flags: c_short,
@@ -548,7 +478,7 @@ const posix_spawn_file_actions_addfchdir_np_type = *const fn (actions: *posix_sp
 const posix_spawn_file_actions_addchdir_np_type = *const fn (actions: *posix_spawn_file_actions_t, path: [*:0]const u8) c_int;
 
 /// When not available, these functions will return 0.
-pub fn posix_spawn_file_actions_addfchdir_np(actions: *posix_spawn_file_actions_t, filedes: std.os.fd_t) c_int {
+pub fn posix_spawn_file_actions_addfchdir_np(actions: *posix_spawn_file_actions_t, filedes: std.posix.fd_t) c_int {
     const function = bun.C.dlsym(posix_spawn_file_actions_addfchdir_np_type, "posix_spawn_file_actions_addfchdir_np") orelse
         return 0;
     return function(actions, filedes);
@@ -561,9 +491,11 @@ pub fn posix_spawn_file_actions_addchdir_np(actions: *posix_spawn_file_actions_t
     return function(actions, path);
 }
 
-pub extern fn vmsplice(fd: c_int, iovec: [*]const std.os.iovec, iovec_count: usize, flags: u32) isize;
+pub extern fn vmsplice(fd: c_int, iovec: [*]const std.posix.iovec, iovec_count: usize, flags: u32) isize;
 
 const net_c = @cImport({
+    // TODO: remove this c import! instead of adding to it, add to
+    // c-headers-for-zig.h and use bun.C.translated.
     @cInclude("ifaddrs.h"); // getifaddrs, freeifaddrs
     @cInclude("net/if.h"); // IFF_RUNNING, IFF_UP
     @cInclude("fcntl.h"); // F_DUPFD_CLOEXEC
@@ -586,18 +518,41 @@ pub const F = struct {
 };
 
 pub const Mode = u32;
-pub const E = std.os.E;
-pub const S = std.os.S;
+pub const E = std.posix.E;
+pub const S = std.posix.S;
 
 pub extern "c" fn umask(Mode) Mode;
 
 pub fn getErrno(rc: anytype) E {
-    return std.c.getErrno(rc);
+    const Type = @TypeOf(rc);
+
+    return switch (Type) {
+        // raw system calls from std.os.linux.* will return usize
+        // the errno is stored in this value
+        usize => {
+            const signed: isize = @bitCast(rc);
+            const int = if (signed > -4096 and signed < 0) -signed else 0;
+            return @enumFromInt(int);
+        },
+
+        // glibc system call wrapper returns i32/int
+        // the errno is stored in a thread local variable
+        //
+        // TODO: the inclusion of  'u32' and 'isize' seems suspicous
+        i32, c_int, u32, isize, i64 => if (rc == -1)
+            @enumFromInt(std.c._errno().*)
+        else
+            .SUCCESS,
+
+        else => @compileError("Not implemented yet for type " ++ @typeName(Type)),
+    };
 }
 
 pub const getuid = std.os.linux.getuid;
 pub const getgid = std.os.linux.getgid;
 pub const linux_fs = if (bun.Environment.isLinux) @cImport({
+    // TODO: remove this c import! instead of adding to it, add to
+    // c-headers-for-zig.h and use bun.C.translated.
     @cInclude("linux/fs.h");
 }) else struct {};
 
@@ -623,20 +578,20 @@ pub const RWFFlagSupport = enum(u8) {
     }
 
     pub fn disable() void {
-        rwf_bool.store(.unsupported, .Monotonic);
+        rwf_bool.store(.unsupported, .monotonic);
     }
 
     /// Workaround for https://github.com/google/gvisor/issues/2601
     pub fn isMaybeSupported() bool {
         if (comptime !bun.Environment.isLinux) return false;
-        switch (rwf_bool.load(.Monotonic)) {
+        switch (rwf_bool.load(.monotonic)) {
             .unknown => {
-                if (isLinuxKernelVersionWithBuggyRWF_NONBLOCK()) {
-                    rwf_bool.store(.unsupported, .Monotonic);
+                if (isLinuxKernelVersionWithBuggyRWF_NONBLOCK() or bun.getRuntimeFeatureFlag("BUN_FEATURE_FLAG_DISABLE_RWF_NONBLOCK")) {
+                    rwf_bool.store(.unsupported, .monotonic);
                     return false;
                 }
 
-                rwf_bool.store(.supported, .Monotonic);
+                rwf_bool.store(.supported, .monotonic);
                 return true;
             },
             .supported => {
@@ -651,19 +606,19 @@ pub const RWFFlagSupport = enum(u8) {
     }
 };
 
-pub extern "C" fn sys_preadv2(
+pub extern "c" fn sys_preadv2(
     fd: c_int,
-    iov: [*]const std.os.iovec,
+    iov: [*]const std.posix.iovec,
     iovcnt: c_int,
-    offset: std.os.off_t,
+    offset: std.posix.off_t,
     flags: c_uint,
 ) isize;
 
-pub extern "C" fn sys_pwritev2(
+pub extern "c" fn sys_pwritev2(
     fd: c_int,
-    iov: [*]const std.os.iovec_const,
+    iov: [*]const std.posix.iovec_const,
     iovcnt: c_int,
-    offset: std.os.off_t,
+    offset: std.posix.off_t,
     flags: c_uint,
 ) isize;
 
@@ -675,4 +630,82 @@ pub const RENAME_NOREPLACE = 1 << 0;
 pub const RENAME_EXCHANGE = 1 << 1;
 pub const RENAME_WHITEOUT = 1 << 2;
 
-pub extern "C" fn quick_exit(code: c_int) noreturn;
+pub extern "c" fn quick_exit(code: c_int) noreturn;
+pub extern "c" fn memrchr(ptr: [*]const u8, val: c_int, len: usize) ?[*]const u8;
+
+export fn sys_epoll_pwait2(epfd: i32, events: ?[*]std.os.linux.epoll_event, maxevents: i32, timeout: ?*const std.os.linux.timespec, sigmask: ?*const std.os.linux.sigset_t) isize {
+    return @bitCast(
+        std.os.linux.syscall6(
+            .epoll_pwait2,
+            @bitCast(@as(isize, @intCast(epfd))),
+            @intFromPtr(events),
+            @bitCast(@as(isize, @intCast(maxevents))),
+            @intFromPtr(timeout),
+            @intFromPtr(sigmask),
+            // This is the correct value. glibc claims to pass `sizeof sigset_t` for this argument,
+            // which would be 128, but they actually pass 8 which is what the kernel expects.
+            // https://github.com/ziglang/zig/issues/12715
+            8,
+        ),
+    );
+}
+
+// *********************************************************************************
+// libc overrides
+// *********************************************************************************
+
+fn simulateLibcErrno(rc: usize) c_int {
+    const signed: isize = @bitCast(rc);
+    const int: c_int = @intCast(if (signed > -4096 and signed < 0) -signed else 0);
+    std.c._errno().* = int;
+    return if (signed > -4096 and signed < 0) -1 else int;
+}
+
+pub export fn stat(path: [*:0]const u8, buf: *std.os.linux.Stat) c_int {
+    // https://git.musl-libc.org/cgit/musl/tree/src/stat/stat.c
+    const rc = std.os.linux.fstatat(std.os.linux.AT.FDCWD, path, buf, 0);
+    return simulateLibcErrno(rc);
+}
+
+pub const stat64 = stat;
+pub const lstat64 = lstat;
+pub const fstat64 = fstat;
+pub const fstatat64 = fstatat;
+
+pub export fn lstat(path: [*:0]const u8, buf: *std.os.linux.Stat) c_int {
+    // https://git.musl-libc.org/cgit/musl/tree/src/stat/lstat.c
+    const rc = std.os.linux.fstatat(std.os.linux.AT.FDCWD, path, buf, std.os.linux.AT.SYMLINK_NOFOLLOW);
+    return simulateLibcErrno(rc);
+}
+
+pub export fn fstat(fd: c_int, buf: *std.os.linux.Stat) c_int {
+    const rc = std.os.linux.fstat(fd, buf);
+    return simulateLibcErrno(rc);
+}
+
+pub export fn fstatat(dirfd: i32, path: [*:0]const u8, buf: *std.os.linux.Stat, flags: u32) c_int {
+    const rc = std.os.linux.fstatat(dirfd, path, buf, flags);
+    return simulateLibcErrno(rc);
+}
+
+pub export fn statx(dirfd: i32, path: [*:0]const u8, flags: u32, mask: u32, buf: *std.os.linux.Statx) c_int {
+    const rc = std.os.linux.statx(dirfd, path, flags, mask, buf);
+    return simulateLibcErrno(rc);
+}
+
+comptime {
+    _ = stat;
+    _ = stat64;
+    _ = lstat;
+    _ = lstat64;
+    _ = fstat;
+    _ = fstat64;
+    _ = fstatat;
+    _ = statx;
+    @export(&stat, .{ .name = "stat64" });
+    @export(&lstat, .{ .name = "lstat64" });
+    @export(&fstat, .{ .name = "fstat64" });
+    @export(&fstatat, .{ .name = "fstatat64" });
+}
+
+// *********************************************************************************

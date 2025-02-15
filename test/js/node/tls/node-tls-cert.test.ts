@@ -1,9 +1,9 @@
 import { expect, it } from "bun:test";
-import tls from "tls";
-import type { Server, TLSSocket } from "node:tls";
-import type { AddressInfo } from "node:net";
-import { join } from "path";
 import { readFileSync } from "fs";
+import type { AddressInfo } from "node:net";
+import type { Server, TLSSocket } from "node:tls";
+import { join } from "path";
+import tls from "tls";
 
 const client = {
   key: readFileSync(join(import.meta.dir, "fixtures", "ec10-key.pem"), "utf8"),
@@ -77,7 +77,7 @@ function connect(options: any) {
         resolveOrReject();
       })
       .listen(0, function () {
-        const optClient = { ...options.client, port: server.server.address().port };
+        const optClient = { ...options.client, port: server.server.address().port, host: "127.0.0.1" };
         try {
           const conn = tls
             .connect(optClient, () => {

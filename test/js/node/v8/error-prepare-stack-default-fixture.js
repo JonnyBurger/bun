@@ -5,19 +5,38 @@ const orig = Error.prepareStackTrace;
 Error.prepareStackTrace = (err, stack) => {
   return orig(err, stack);
 };
+var stack2, stack;
 
-const err = new Error();
-Error.captureStackTrace(err);
-const stack = err.stack;
+function twoWrapperLevel() {
+  const err = new Error();
+  Error.captureStackTrace(err);
+  stack = err.stack;
 
-Error.prepareStackTrace = undefined;
-const err2 = new Error();
-Error.captureStackTrace(err2);
-const stack2 = err2.stack;
+  Error.prepareStackTrace = undefined;
+  const err2 = new Error();
+  Error.captureStackTrace(err2);
+  stack2 = err2.stack;
+}
 
-const stackIgnoringLineAndColumn = stack2.replaceAll(":16:2", "N");
-const stack2IgnoringLineAndColumn = stack.replaceAll(":11:2", "N");
+function oneWrapperLevel() {
+  // ...
+  var a = 123;
+  globalThis.a = a;
+  // ---
+
+  twoWrapperLevel();
+}
+
+oneWrapperLevel();
+
+// The native line column numbers might differ a bit here.
+const stackIgnoringLineAndColumn = stack.replaceAll(":12:26", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
+const stack2IgnoringLineAndColumn = stack2.replaceAll(":17:26", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
 if (stackIgnoringLineAndColumn !== stack2IgnoringLineAndColumn) {
-  console.log(stackIgnoringLineAndColumn, stack2IgnoringLineAndColumn);
+  console.log("\n-----\n");
+  console.log(stackIgnoringLineAndColumn);
+  console.log("\n-----\n");
+  console.log(stack2IgnoringLineAndColumn);
+  console.log("\n-----\n");
   throw new Error("Stacks are different");
 }

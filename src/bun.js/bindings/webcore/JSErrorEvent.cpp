@@ -53,7 +53,7 @@ using namespace JSC;
 
 template<> ErrorEvent::Init convertDictionary<ErrorEvent::Init>(JSGlobalObject& lexicalGlobalObject, JSValue value)
 {
-    VM& vm = JSC::getVM(&lexicalGlobalObject);
+    auto& vm = JSC::getVM(&lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     bool isNullOrUndefined = value.isUndefinedOrNull();
     auto* object = isNullOrUndefined ? nullptr : value.getObject();
@@ -114,7 +114,7 @@ template<> ErrorEvent::Init convertDictionary<ErrorEvent::Init>(JSGlobalObject& 
     if (isNullOrUndefined)
         errorValue = jsUndefined();
     else {
-        errorValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "error"_s));
+        errorValue = object->get(&lexicalGlobalObject, vm.propertyNames->error);
         RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!errorValue.isUndefined()) {
@@ -150,7 +150,7 @@ template<> ErrorEvent::Init convertDictionary<ErrorEvent::Init>(JSGlobalObject& 
     if (isNullOrUndefined)
         messageValue = jsUndefined();
     else {
-        messageValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "message"_s));
+        messageValue = object->get(&lexicalGlobalObject, vm.propertyNames->message);
         RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!messageValue.isUndefined()) {
@@ -206,7 +206,7 @@ using JSErrorEventDOMConstructor = JSDOMConstructor<JSErrorEvent>;
 
 template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSErrorEventDOMConstructor::construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
 {
-    VM& vm = lexicalGlobalObject->vm();
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* castedThis = jsCast<JSErrorEventDOMConstructor*>(callFrame->jsCallee());
     ASSERT(castedThis);
@@ -214,10 +214,10 @@ template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSErrorEventDOMConstruct
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto type = convert<IDLAtomStringAdaptor<IDLDOMString>>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     EnsureStillAliveScope argument1 = callFrame->argument(1);
     auto eventInitDict = convert<IDLDictionary<ErrorEvent::Init>>(*lexicalGlobalObject, argument1.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     auto object = ErrorEvent::create(type, WTFMove(eventInitDict));
     if constexpr (IsExceptionOr<decltype(object)>)
         RETURN_IF_EXCEPTION(throwScope, {});
@@ -299,7 +299,7 @@ JSValue JSErrorEvent::getConstructor(VM& vm, const JSGlobalObject* globalObject)
 
 JSC_DEFINE_CUSTOM_GETTER(jsErrorEventConstructor, (JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue, PropertyName))
 {
-    VM& vm = JSC::getVM(lexicalGlobalObject);
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* prototype = jsDynamicCast<JSErrorEventPrototype*>(JSValue::decode(thisValue));
     if (UNLIKELY(!prototype))
@@ -409,7 +409,7 @@ void JSErrorEvent::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     auto* thisObject = jsCast<JSErrorEvent*>(cell);
     analyzer.setWrappedObjectForCell(cell, &thisObject->wrapped());
     if (thisObject->scriptExecutionContext())
-        analyzer.setLabelForCell(cell, "url " + thisObject->scriptExecutionContext()->url().string());
+        analyzer.setLabelForCell(cell, makeString("url "_s, thisObject->scriptExecutionContext()->url().string()));
     Base::analyzeHeap(cell, analyzer);
 }
 
@@ -431,18 +431,18 @@ JSC::JSValue toJSNewlyCreated(JSC::JSGlobalObject*, JSDOMGlobalObject* globalObj
 
     //     if constexpr (std::is_polymorphic_v<ErrorEvent>) {
     // #if ENABLE(BINDING_INTEGRITY)
-    //         const void* actualVTablePointer = getVTablePointer(impl.ptr());
+    //         // const void* actualVTablePointer = getVTablePointer(impl.ptr());
     // #if PLATFORM(WIN)
     //         void* expectedVTablePointer = __identifier("??_7ErrorEvent@WebCore@@6B@");
     // #else
-    //         void* expectedVTablePointer = &_ZTVN7WebCore10ErrorEventE[2];
+    //         // void* expectedVTablePointer = &_ZTVN7WebCore10ErrorEventE[2];
     // #endif
 
     //         // If you hit this assertion you either have a use after free bug, or
     //         // ErrorEvent has subclasses. If ErrorEvent has subclasses that get passed
     //         // to toJS() we currently require ErrorEvent you to opt out of binding hardening
     //         // by adding the SkipVTableValidation attribute to the interface IDL definition
-    //         RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+    //         // RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
     // #endif
     return createWrapper<ErrorEvent>(globalObject, WTFMove(impl));
 }

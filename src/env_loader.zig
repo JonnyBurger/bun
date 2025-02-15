@@ -17,6 +17,7 @@ const Fs = @import("./fs.zig");
 const URL = @import("./url.zig").URL;
 const Api = @import("./api/schema.zig").Api;
 const which = @import("./which.zig").which;
+const s3 = bun.S3;
 
 const DotEnvFileSuffix = enum {
     development,
@@ -37,13 +38,15 @@ pub const Loader = struct {
     @".env.test.local": ?logger.Source = null,
     @".env": ?logger.Source = null,
 
-    // only populated with files specified explicitely (e.g. --env-file arg)
-    custom_files_loaded: std.StringArrayHashMap(logger.Source),
+    // only populated with files specified explicitly (e.g. --env-file arg)
+    custom_files_loaded: bun.StringArrayHashMap(logger.Source),
 
     quiet: bool = false,
 
     did_load_process: bool = false,
     reject_unauthorized: ?bool = null,
+
+    aws_credentials: ?s3.S3Credentials = null,
 
     pub fn iterator(this: *const Loader) Map.HashTable.Iterator {
         return this.map.iterator();
@@ -112,6 +115,63 @@ pub const Loader = struct {
         }
     }
 
+    pub fn getS3Credentials(this: *Loader) s3.S3Credentials {
+        if (this.aws_credentials) |credentials| {
+            return credentials;
+        }
+
+        var accessKeyId: []const u8 = "";
+        var secretAccessKey: []const u8 = "";
+        var region: []const u8 = "";
+        var endpoint: []const u8 = "";
+        var bucket: []const u8 = "";
+        var session_token: []const u8 = "";
+
+        if (this.get("S3_ACCESS_KEY_ID")) |access_key| {
+            accessKeyId = access_key;
+        } else if (this.get("AWS_ACCESS_KEY_ID")) |access_key| {
+            accessKeyId = access_key;
+        }
+        if (this.get("S3_SECRET_ACCESS_KEY")) |access_key| {
+            secretAccessKey = access_key;
+        } else if (this.get("AWS_SECRET_ACCESS_KEY")) |access_key| {
+            secretAccessKey = access_key;
+        }
+
+        if (this.get("S3_REGION")) |region_| {
+            region = region_;
+        } else if (this.get("AWS_REGION")) |region_| {
+            region = region_;
+        }
+        if (this.get("S3_ENDPOINT")) |endpoint_| {
+            endpoint = bun.URL.parse(endpoint_).host;
+        } else if (this.get("AWS_ENDPOINT")) |endpoint_| {
+            endpoint = bun.URL.parse(endpoint_).host;
+        }
+        if (this.get("S3_BUCKET")) |bucket_| {
+            bucket = bucket_;
+        } else if (this.get("AWS_BUCKET")) |bucket_| {
+            bucket = bucket_;
+        }
+        if (this.get("S3_SESSION_TOKEN")) |token| {
+            session_token = token;
+        } else if (this.get("AWS_SESSION_TOKEN")) |token| {
+            session_token = token;
+        }
+        this.aws_credentials = .{
+            .accessKeyId = accessKeyId,
+            .secretAccessKey = secretAccessKey,
+            .region = region,
+            .endpoint = endpoint,
+            .bucket = bucket,
+            .sessionToken = session_token,
+        };
+
+        return this.aws_credentials.?;
+    }
+    /// Checks whether `NODE_TLS_REJECT_UNAUTHORIZED` is set to `0` or `false`.
+    ///
+    /// **Prefer VirtualMachine.getTLSRejectUnauthorized()** for JavaScript, as individual workers could have different settings.
     pub fn getTLSRejectUnauthorized(this: *Loader) bool {
         if (this.reject_unauthorized) |reject_unauthorized| {
             return reject_unauthorized;
@@ -131,11 +191,15 @@ pub const Loader = struct {
         return true;
     }
 
-    pub fn getHttpProxy(this: *Loader, url: URL) ?URL {
+    pub fn getHttpProxyFor(this: *Loader, url: URL) ?URL {
+        return this.getHttpProxy(url.isHTTP(), url.hostname);
+    }
+
+    pub fn getHttpProxy(this: *Loader, is_http: bool, hostname: ?[]const u8) ?URL {
         // TODO: When Web Worker support is added, make sure to intern these strings
         var http_proxy: ?URL = null;
 
-        if (url.isHTTP()) {
+        if (is_http) {
             if (this.get("http_proxy") orelse this.get("HTTP_PROXY")) |proxy| {
                 if (proxy.len > 0 and !strings.eqlComptime(proxy, "\"\"") and !strings.eqlComptime(proxy, "''")) {
                     http_proxy = URL.parse(proxy);
@@ -151,13 +215,13 @@ pub const Loader = struct {
 
         // NO_PROXY filter
         // See the syntax at https://about.gitlab.com/blog/2021/01/27/we-need-to-talk-no-proxy/
-        if (http_proxy != null) {
+        if (http_proxy != null and hostname != null) {
             if (this.get("no_proxy") orelse this.get("NO_PROXY")) |no_proxy_text| {
                 if (no_proxy_text.len == 0 or strings.eqlComptime(no_proxy_text, "\"\"") or strings.eqlComptime(no_proxy_text, "''")) {
                     return http_proxy;
                 }
 
-                var no_proxy_list = std.mem.split(u8, no_proxy_text, ",");
+                var no_proxy_list = std.mem.splitScalar(u8, no_proxy_text, ',');
                 var next = no_proxy_list.next();
                 while (next != null) {
                     var host = strings.trim(next.?, &strings.whitespace_chars);
@@ -169,7 +233,7 @@ pub const Loader = struct {
                         host = host[1..];
                     }
                     //hostname ends with suffix
-                    if (strings.endsWith(url.hostname, host)) {
+                    if (strings.endsWith(hostname.?, host)) {
                         return null;
                     }
                     next = no_proxy_list.next();
@@ -193,7 +257,7 @@ pub const Loader = struct {
 
         // if they have ccache installed, put it in env variable `CMAKE_CXX_COMPILER_LAUNCHER` so
         // cmake can use it to hopefully speed things up
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var buf: bun.PathBuffer = undefined;
         const ccache_path = bun.which(
             &buf,
             this.get("PATH") orelse return,
@@ -240,6 +304,28 @@ pub const Loader = struct {
         return true;
     }
 
+    pub fn getAs(this: *const Loader, comptime T: type, key: string) ?T {
+        const value = this.get(key) orelse return null;
+        switch (comptime T) {
+            bool => {
+                if (strings.eqlComptime(value, "")) return false;
+                if (strings.eqlComptime(value, "0")) return false;
+                if (strings.eqlComptime(value, "NO")) return false;
+                if (strings.eqlComptime(value, "OFF")) return false;
+                if (strings.eqlComptime(value, "false")) return false;
+
+                return true;
+            },
+            else => @compileError("Implement getAs for this type"),
+        }
+    }
+
+    pub var has_no_clear_screen_cli_flag: ?bool = null;
+    /// Returns whether the `BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD` env var is set to something truthy
+    pub fn hasSetNoClearTerminalOnReload(this: *const Loader, default_value: bool) bool {
+        return (has_no_clear_screen_cli_flag orelse this.getAs(bool, "BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD")) orelse default_value;
+    }
+
     pub fn get(this: *const Loader, key: string) ?string {
         var _key = key;
         if (_key.len > 0 and _key[0] == '$') {
@@ -266,7 +352,7 @@ pub const Loader = struct {
     /// **lower priority** so that users may override defaults. Unlike regular
     /// defines, environment variables are loaded as JavaScript string literals.
     ///
-    /// Empty enivronment variables become empty strings.
+    /// Empty environment variables become empty strings.
     pub fn copyForDefine(
         this: *Loader,
         comptime JSONStore: type,
@@ -426,7 +512,7 @@ pub const Loader = struct {
         return Loader{
             .map = map,
             .allocator = allocator,
-            .custom_files_loaded = std.StringArrayHashMap(logger.Source).init(allocator),
+            .custom_files_loaded = bun.StringArrayHashMap(logger.Source).init(allocator),
         };
     }
 
@@ -1063,7 +1149,7 @@ const Parser = struct {
 };
 
 pub const Map = struct {
-    const HashTableValue = struct {
+    pub const HashTableValue = struct {
         value: string,
         conditional: bool,
     };
@@ -1071,17 +1157,17 @@ pub const Map = struct {
     // An issue with this exact implementation is unicode characters can technically appear in these
     // keys, and we use a simple toLowercase function that only applies to ascii, so this will make
     // some strings collide.
-    const HashTable = (if (Environment.isWindows) bun.CaseInsensitiveASCIIStringArrayHashMap else bun.StringArrayHashMap)(HashTableValue);
+    pub const HashTable = (if (Environment.isWindows) bun.CaseInsensitiveASCIIStringArrayHashMap else bun.StringArrayHashMap)(HashTableValue);
 
     const GetOrPutResult = HashTable.GetOrPutResult;
 
     map: HashTable,
 
-    pub fn createNullDelimitedEnvMap(this: *Map, arena: std.mem.Allocator) ![:null]?[*:0]u8 {
+    pub fn createNullDelimitedEnvMap(this: *Map, arena: std.mem.Allocator) ![:null]?[*:0]const u8 {
         var env_map = &this.map;
 
         const envp_count = env_map.count();
-        const envp_buf = try arena.allocSentinel(?[*:0]u8, envp_count, null);
+        const envp_buf = try arena.allocSentinel(?[*:0]const u8, envp_count, null);
         {
             var it = env_map.iterator();
             var i: usize = 0;
@@ -1169,6 +1255,20 @@ pub const Map = struct {
         });
     }
 
+    pub fn ensureUnusedCapacity(this: *Map, additional_count: usize) !void {
+        return this.map.ensureUnusedCapacity(additional_count);
+    }
+
+    pub fn putAssumeCapacity(this: *Map, key: string, value: string) void {
+        if (Environment.isWindows and Environment.allow_assert) {
+            bun.assert(bun.strings.indexOfChar(key, '\x00') == null);
+        }
+        this.map.putAssumeCapacity(key, .{
+            .value = value,
+            .conditional = false,
+        });
+    }
+
     pub inline fn putAllocKeyAndValue(this: *Map, allocator: std.mem.Allocator, key: string, value: string) !void {
         const gop = try this.map.getOrPut(key);
         gop.value_ptr.* = .{
@@ -1245,7 +1345,11 @@ pub const Map = struct {
     }
 
     pub fn remove(this: *Map, key: string) void {
-        this.map.remove(key);
+        _ = this.map.swapRemove(key);
+    }
+
+    pub fn cloneWithAllocator(this: *const Map, new_allocator: std.mem.Allocator) !Map {
+        return .{ .map = try this.map.cloneWithAllocator(new_allocator) };
     }
 };
 

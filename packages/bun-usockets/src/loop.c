@@ -21,27 +21,30 @@
 #ifndef WIN32
 #include <sys/ioctl.h>
 #endif
+#include "wtf/Platform.h"
+
+#if ASSERT_ENABLED
+extern const size_t Bun__lock__size;
+extern void __attribute((__noreturn__)) Bun__panic(const char* message, size_t length);
+#define BUN_PANIC(message) Bun__panic(message, sizeof(message) - 1)
+#endif
 
 /* The loop has 2 fallthrough polls */
 void us_internal_loop_data_init(struct us_loop_t *loop, void (*wakeup_cb)(struct us_loop_t *loop),
     void (*pre_cb)(struct us_loop_t *loop), void (*post_cb)(struct us_loop_t *loop)) {
+    // We allocate with calloc, so we only need to initialize the specific fields in use.
     loop->data.sweep_timer = us_create_timer(loop, 1, 0);
     loop->data.recv_buf = malloc(LIBUS_RECV_BUFFER_LENGTH + LIBUS_RECV_BUFFER_PADDING * 2);
     loop->data.send_buf = malloc(LIBUS_SEND_BUFFER_LENGTH);
-    loop->data.ssl_data = 0;
-    loop->data.head = 0;
-    loop->data.iterator = 0;
-    loop->data.closed_udp_head = 0;
-    loop->data.closed_head = 0;
-    loop->data.low_prio_head = 0;
-    loop->data.low_prio_budget = 0;
-
     loop->data.pre_cb = pre_cb;
     loop->data.post_cb = post_cb;
-    loop->data.iteration_nr = 0;
-
     loop->data.wakeup_async = us_internal_create_async(loop, 1, 0);
     us_internal_async_set(loop->data.wakeup_async, (void (*)(struct us_internal_async *)) wakeup_cb);
+#if ASSERT_ENABLED
+    if (Bun__lock__size != sizeof(loop->data.mutex)) {
+        BUN_PANIC("The size of the mutex must match the size of the lock");
+    }
+#endif
 }
 
 void us_internal_loop_data_free(struct us_loop_t *loop) {
@@ -165,25 +168,75 @@ void us_internal_handle_low_priority_sockets(struct us_loop_t *loop) {
     }
 }
 
+// Called when DNS resolution completes
+// Does not wake up the loop.
+void us_internal_dns_callback(struct us_connecting_socket_t *c, void* addrinfo_req) {
+    struct us_loop_t *loop = c->context->loop;
+    Bun__lock(&loop->data.mutex);
+    c->addrinfo_req = addrinfo_req;
+    c->next = loop->data.dns_ready_head;
+    loop->data.dns_ready_head = c;
+    Bun__unlock(&loop->data.mutex);
+}
+
+// Called when DNS resolution completes
+// Wakes up the loop.
+// Can be caleld from any thread.
+void us_internal_dns_callback_threadsafe(struct us_connecting_socket_t *c, void* addrinfo_req) {
+    struct us_loop_t *loop = c->context->loop;
+    us_internal_dns_callback(c, addrinfo_req);
+    us_wakeup_loop(loop);
+}
+
+void us_internal_drain_pending_dns_resolve(struct us_loop_t *loop, struct us_connecting_socket_t *s) {
+    while (s) {
+        struct us_connecting_socket_t *next = s->next;
+        us_internal_socket_after_resolve(s);
+        s = next;
+    }
+}
+
+int us_internal_handle_dns_results(struct us_loop_t *loop) {
+    Bun__lock(&loop->data.mutex);
+    struct us_connecting_socket_t *s = loop->data.dns_ready_head;
+    loop->data.dns_ready_head = NULL;
+    Bun__unlock(&loop->data.mutex);
+    us_internal_drain_pending_dns_resolve(loop, s);
+    return s != NULL;
+}
+
 /* Note: Properly takes the linked list and timeout sweep into account */
 void us_internal_free_closed_sockets(struct us_loop_t *loop) {
     /* Free all closed sockets (maybe it is better to reverse order?) */
-    if (loop->data.closed_head) {
-        for (struct us_socket_t *s = loop->data.closed_head; s; ) {
-            struct us_socket_t *next = s->next;
-            us_poll_free((struct us_poll_t *) s, loop);
-            s = next;
-        }
-        loop->data.closed_head = 0;
+    for (struct us_socket_t *s = loop->data.closed_head; s; ) {
+        struct us_socket_t *next = s->next;
+        us_poll_free((struct us_poll_t *) s, loop);
+        s = next;
     }
-    if (loop->data.closed_udp_head) {
-        for (struct us_udp_socket_t *s = loop->data.closed_udp_head; s; ) {
-            struct us_udp_socket_t *next = s->next;
-            us_poll_free((struct us_poll_t *) s, loop);
-            s = next;
-        }
-        loop->data.closed_udp_head = 0;
+    loop->data.closed_head = 0;
+
+    for (struct us_udp_socket_t *s = loop->data.closed_udp_head; s; ) {
+        struct us_udp_socket_t *next = s->next;
+        us_poll_free((struct us_poll_t *) s, loop);
+        s = next;
     }
+    loop->data.closed_udp_head = 0;
+
+    for (struct us_connecting_socket_t *s = loop->data.closed_connecting_head; s; ) {
+        struct us_connecting_socket_t *next = s->next;
+        us_free(s);
+        s = next;
+    }
+    loop->data.closed_connecting_head = 0;
+}
+
+void us_internal_free_closed_contexts(struct us_loop_t *loop) {
+    for (struct us_socket_context_t *ctx = loop->data.closed_context_head; ctx; ) {
+        struct us_socket_context_t *next = ctx->next;
+        us_free(ctx);
+        ctx = next;
+    }
+    loop->data.closed_context_head = 0;
 }
 
 void sweep_timer_cb(struct us_internal_callback_t *cb) {
@@ -197,12 +250,15 @@ long long us_loop_iteration_number(struct us_loop_t *loop) {
 /* These may have somewhat different meaning depending on the underlying event library */
 void us_internal_loop_pre(struct us_loop_t *loop) {
     loop->data.iteration_nr++;
+    us_internal_handle_dns_results(loop);
     us_internal_handle_low_priority_sockets(loop);
     loop->data.pre_cb(loop);
 }
 
 void us_internal_loop_post(struct us_loop_t *loop) {
+    us_internal_handle_dns_results(loop);
     us_internal_free_closed_sockets(loop);
+    us_internal_free_closed_contexts(loop);
     loop->data.post_cb(loop);
 }
 
@@ -212,7 +268,7 @@ void us_internal_loop_post(struct us_loop_t *loop) {
 #define us_ioctl ioctl
 #endif
 
-void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events) {
+void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int eof, int events) {
     switch (us_internal_poll_type(p)) {
     case POLL_TYPE_CALLBACK: {
             struct us_internal_callback_t *cb = (struct us_internal_callback_t *) p;
@@ -230,29 +286,7 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
             /* Both connect and listen sockets are semi-sockets
              * but they poll for different events */
             if (us_poll_events(p) == LIBUS_SOCKET_WRITABLE) {
-                struct us_socket_t *s = (struct us_socket_t *) p;
-
-                /* It is perfectly possible to come here with an error */
-                if (error) {
-                    /* Emit error, close without emitting on_close */
-                    s->context->on_connect_error(s, 0);
-                    us_socket_close_connecting(0, s);
-                    s = NULL;
-                } else {
-                    /* All sockets poll for readable */
-                    us_poll_change(p, s->context->loop, LIBUS_SOCKET_READABLE);
-
-                    /* We always use nodelay */
-                    bsd_socket_nodelay(us_poll_fd(p), 1);
-
-                    /* We are now a proper socket */
-                    us_internal_poll_set_type(p, POLL_TYPE_SOCKET);
-
-                    /* If we used a connection timeout we have to reset it here */
-                    us_socket_timeout(0, s, 0);
-
-                    s->context->on_open(s, 1, 0, 0);
-                }
+                us_internal_socket_after_open((struct us_socket_t *) p, error || eof);
             } else {
                 struct us_listen_socket_t *listen_socket = (struct us_listen_socket_t *) p;
                 struct bsd_addr_t addr;
@@ -273,9 +307,12 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                         struct us_socket_t *s = (struct us_socket_t *) accepted_p;
 
                         s->context = listen_socket->s.context;
+                        s->connect_state = NULL;
                         s->timeout = 255;
                         s->long_timeout = 255;
                         s->low_prio_state = 0;
+                        s->allow_half_open = listen_socket->s.allow_half_open;
+
 
                         /* We always use nodelay */
                         bsd_socket_nodelay(client_fd, 1);
@@ -327,7 +364,8 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                         s->context->loop->data.low_prio_budget--; /* Still having budget for this iteration - do normal processing */
                     } else {
                         us_poll_change(&s->p, us_socket_context(0, s)->loop, us_poll_events(&s->p) & LIBUS_SOCKET_WRITABLE);
-                        us_internal_socket_context_unlink_socket(s->context, s);
+                        us_socket_context_ref(0,  s->context);
+                        us_internal_socket_context_unlink_socket(0, s->context, s);
 
                         /* Link this socket to the low-priority queue - we use a LIFO queue, to prioritize newer clients that are
                          * maybe not already timeouted - sounds unfair, but works better in real-life with smaller client-timeouts
@@ -379,18 +417,11 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                         #undef LOOP_ISNT_VERY_BUSY_THRESHOLD
                         #endif
                     } else if (!length) {
-                        if (us_socket_is_shut_down(0, s)) {
-                            /* We got FIN back after sending it */
-                            /* Todo: We should give "CLEAN SHUTDOWN" as reason here */
-                            s = us_socket_close(0, s, 0, NULL);
-                        } else {
-                            /* We got FIN, so stop polling for readable */
-                            us_poll_change(&s->p, us_socket_context(0, s)->loop, us_poll_events(&s->p) & LIBUS_SOCKET_WRITABLE);
-                            s = s->context->on_end(s);
-                        }
+                        eof = 1; // lets handle EOF in the same place
+                        break;
                     } else if (length == LIBUS_SOCKET_ERROR && !bsd_would_block()) {
                         /* Todo: decide also here what kind of reason we should give */
-                        s = us_socket_close(0, s, 0, NULL);
+                        s = us_socket_close(0, s, LIBUS_ERR, NULL);
                         return;
                     }
 
@@ -398,10 +429,31 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                 } while (s);
             }
 
-            /* Such as epollerr epollhup */
+            if(eof && s) {
+                if (UNLIKELY(us_socket_is_closed(0, s))) {
+                    // Do not call on_end after the socket has been closed
+                    return;
+                }
+                if (us_socket_is_shut_down(0, s)) {
+                    /* We got FIN back after sending it */
+                    s = us_socket_close(0, s, LIBUS_SOCKET_CLOSE_CODE_CLEAN_SHUTDOWN, NULL);
+                    return;
+                }
+                if(s->allow_half_open) {
+                    /* We got a Error but is EOF and we allow half open so stop polling for readable and keep going*/
+                    us_poll_change(&s->p, us_socket_context(0, s)->loop, us_poll_events(&s->p) & LIBUS_SOCKET_WRITABLE);
+                    s = s->context->on_end(s);
+                } else {
+                    /* We dont allow half open just emit end and close the socket */
+                    s = s->context->on_end(s);
+                    s = us_socket_close(0, s, LIBUS_SOCKET_CLOSE_CODE_CLEAN_SHUTDOWN, NULL);
+                    return;
+                }
+            } 
+            /* Such as epollerr or EV_ERROR */
             if (error && s) {
                 /* Todo: decide what code we give here */
-                s = us_socket_close(0, s, 0, NULL);
+                s = us_socket_close(0, s, error, NULL);
                 return;
             }
             break;
@@ -412,7 +464,32 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                 break;
             }
 
-            if (events & LIBUS_SOCKET_WRITABLE && !error) {
+            if (events & LIBUS_SOCKET_READABLE) {
+                do {
+                    struct udp_recvbuf recvbuf;
+                    bsd_udp_setup_recvbuf(&recvbuf, u->loop->data.recv_buf, LIBUS_RECV_BUFFER_LENGTH);
+                    int npackets = bsd_recvmmsg(us_poll_fd(p), &recvbuf, MSG_DONTWAIT);
+                    if (npackets > 0) {
+                        u->on_data(u, &recvbuf, npackets);
+                    } else {
+                        if (npackets == LIBUS_SOCKET_ERROR) {
+                            // If the error was not EAGAIN, mark the error
+                            if (!bsd_would_block()) {
+                                error = 1;
+                            }
+                        } else {
+                            // 0 messages received, we are done
+                            // this case can happen if either:
+                            // - the total number of messages pending was not divisible by 8
+                            // - recvmsg() was used instead of recvmmsg() and there was no message to read.
+                        }
+
+                        break;
+                    }
+                } while (!u->closed);
+            }
+
+            if (events & LIBUS_SOCKET_WRITABLE && !error && !u->closed) {
                 u->on_drain(u);
                 if (u->closed) {
                     break;
@@ -421,25 +498,9 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
                 // Otherwise we would receive a writable event on every tick of the event loop.
                 us_poll_change(&u->p, u->loop, us_poll_events(&u->p) & LIBUS_SOCKET_READABLE);
             }
-            if (events & LIBUS_SOCKET_READABLE) {
-                struct udp_recvbuf recvbuf;
-                bsd_udp_setup_recvbuf(&recvbuf, u->loop->data.recv_buf, LIBUS_RECV_BUFFER_LENGTH);
-                while (1) {
-                    int npackets = bsd_recvmmsg(us_poll_fd(p), &recvbuf, MSG_DONTWAIT);
-                    if (npackets > 0) {
-                        u->on_data(u, &recvbuf, npackets);
-                        if (u->closed) {
-                            break;
-                        }
-                    } else if (npackets == LIBUS_SOCKET_ERROR && bsd_would_block()) {
-                        // break receive loop when we receive EAGAIN or similar
-                        break;
-                    } else if (npackets == LIBUS_SOCKET_ERROR && !bsd_would_block()) {
-                        // close the socket on error
-                        us_udp_socket_close(u);
-                        break;
-                    }
-                }
+
+            if (error && !u->closed) {
+                us_udp_socket_close(u);
             }
             break;
         }

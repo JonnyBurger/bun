@@ -43,6 +43,47 @@ describe("expect()", () => {
       }
     });
   };
+  describe("toBe()", () => {
+    let obj = {};
+    it.each([
+      [0, 0.0],
+      [+0, +0],
+      [0, +0],
+      [-0, -0],
+      [1, 1],
+      [1, 1.0],
+      [NaN, NaN],
+      [Infinity, Infinity],
+      [obj, obj],
+      [Symbol.for("a"), Symbol.for("a")],
+    ])("expect(%p).toBe(%p) == true", (a, b) => {
+      expect(a).toBe(b);
+      expect(b).toBe(a);
+    });
+    it.each([
+      [0, false],
+      [0, ""],
+      [0, -0],
+      [+0, -0],
+      [1, 2],
+      [1, true],
+      [1, "1"],
+      [Infinity, -Infinity],
+      ["foo", "Foo"],
+      ["foo", "bar"],
+      ["", " "],
+      ["", " "],
+      ["", true],
+      [{}, {}], //
+      [new Set(), new Set()], //
+      [function a() {}, function a() {}], //
+      [Symbol.for("a"), Symbol.for("b")],
+      [Symbol("a"), Symbol("a")],
+    ])("expect(%p).toBe(%p) == false", (a, b) => {
+      expect(a).not.toBe(b);
+      expect(b).not.toBe(a);
+    });
+  });
 
   test("rejects", async () => {
     await expect(Promise.reject(4)).rejects.toBe(4);
@@ -231,6 +272,31 @@ describe("expect()", () => {
     expect([, "boo2"]).toEqual([undefined, "boo2"]);
     expect([, "boo"]).toEqual([, "boo"]);
     expect([, 1]).toEqual([undefined, 1]);
+  });
+
+  describe("toEqual() with DOM types", () => {
+    test("URLSearchParams", () => {
+      expect(new URLSearchParams("a=1")).not.toEqual(new URLSearchParams("b=1"));
+      expect(new URLSearchParams("a=1")).toEqual(new URLSearchParams("a=1"));
+      expect(new URLSearchParams("a=1&b=2")).not.toEqual(new URLSearchParams("a=1&"));
+    });
+
+    if (isBun) {
+      test("URL", () => {
+        expect(new URL("https://example.com")).toEqual(new URL("https://example.com"));
+        expect(new URL("http://wat")).not.toStrictEqual(new URL("http://huh"));
+      });
+    }
+
+    test("Headers", () => {
+      expect(new Headers({ "a": "1" })).toEqual(new Headers({ "a": "1" }));
+      expect(new Headers({ "a": "1" })).not.toEqual(new Headers({ "b": "1" }));
+      expect(new Headers({ "a": "1" })).not.toEqual(new Headers({ "a": "2" }));
+      expect(new Headers({ "a": "1" })).not.toEqual(new Headers({ "a": "1", "b": "2" }));
+    });
+
+    // TODO: FormData
+    // It would need to compare Blob, which is tricky.
   });
 
   describe("BigInt", () => {
@@ -474,6 +540,30 @@ describe("expect()", () => {
       expect(o1).toEqual(o2);
       expect(o1).toStrictEqual(o2);
     }
+  });
+
+  test("deepEquals bugfix #11370", () => {
+    // Two objects with equal number of properties, but left object has
+    // undefined keys and right object has keys that don't exist
+    // in left object.
+
+    expect({ b: undefined }).not.toEqual({ a: 1 });
+    expect({ b: 1 }).not.toEqual({ a: undefined });
+    // @ts-expect-error
+    expect({ b: undefined }).toEqual({ a: undefined });
+    expect({ b: undefined }).not.toStrictEqual({ a: 1 });
+    expect({ b: 1 }).not.toStrictEqual({ a: undefined });
+    expect({ b: undefined }).not.toStrictEqual({ a: undefined });
+    // @ts-expect-error
+    expect({ c: undefined, a: 1, b: undefined }).toEqual({ a: 1 });
+    // @ts-expect-error
+    expect({ a: 1 }).toEqual({ c: undefined, a: 1, b: undefined });
+    expect({ c: undefined, a: 1, b: undefined }).not.toStrictEqual({ a: 1 });
+    // @ts-expect-error
+    expect({ a: 1, b: undefined }).toEqual({ a: 1, c: undefined });
+    // @ts-expect-error
+    expect({ a: 1, c: undefined }).toEqual({ a: 1, b: undefined });
+    expect({ a: 1, b: undefined }).not.toStrictEqual({ a: 1, c: undefined });
   });
 
   // Doesn't work on jest because of https://github.com/jestjs/jest/issues/10788
@@ -757,6 +847,32 @@ describe("expect()", () => {
       expect({ a: 123n }).toEqual({ a: expect.any(BigInt) });
       expect({ a: 123n }).not.toEqual({ a: expect.any(g) });
     });
+  });
+
+  test("toThrow asymmetric matchers", () => {
+    expect(() => {
+      const err = new Error("foo");
+      err.code = "ERR_BAR";
+      throw err;
+    }).toThrow(expect.objectContaining({ code: "ERR_BAR" }));
+
+    expect(() => {
+      const err = new TypeError("foo");
+      err.code = "ERR_BAZ";
+      throw err;
+    }).not.toThrow(expect.objectContaining({ code: "ERR_BAR", name: "TypeError" }));
+
+    expect(() => {
+      const err = new TypeError("foo");
+      err.code = "ERR_BAZ";
+      throw err;
+    }).toThrow(expect.objectContaining({ code: "ERR_BAZ", name: "TypeError" }));
+
+    expect(() => {
+      const err = new TypeError("foo");
+      err.code = "ERR_BAZ";
+      throw err;
+    }).toThrow(expect.objectContaining({ code: "ERR_BAZ", name: "TypeError" }));
   });
 
   test("toThrow", () => {
@@ -1051,6 +1167,32 @@ describe("expect()", () => {
     expect(w).not.toEqual(v);
     expect(v).toEqual(v);
     expect(w).toEqual(w);
+  });
+
+  test("deepEquals Set/Map stress test", () => {
+    const arr1 = [];
+    const arr2 = [];
+    const arr3 = [];
+    const arr4 = [];
+
+    for (let i = 0; i < 150; i++) {
+      arr1[i] = [i];
+      arr2[i] = [i];
+      arr3[i] = [i, [i]];
+      arr4[i] = [i, [i]];
+    }
+
+    for (let i = 0; i < 2000; i++) {
+      let outerSet = new Set(arr1);
+      let innerSet = new Set(arr2);
+      Bun.deepEquals(outerSet, innerSet);
+    }
+
+    for (let i = 0; i < 1000; i++) {
+      let outerMap = new Map(arr3);
+      let innerMap = new Map(arr4);
+      Bun.deepEquals(outerMap, innerMap);
+    }
   });
 
   test("deepEquals - Date", () => {
@@ -2208,11 +2350,10 @@ describe("expect()", () => {
       expect(thisFile).toHaveLength(Bun.file(__filename).size);
 
       // empty file should have length 0
-      require("fs").writeFileSync("/tmp/empty.txt", "");
-      expect(Bun.file("/tmp/empty.txt")).toHaveLength(0);
+      expect(Bun.file(tmpFile(true))).toHaveLength(0);
 
       // if a file doesn't exist, it should throw (not return 0 size)
-      expect(() => expect(Bun.file("/does-not-exist/file.txt")).toHaveLength(0)).toThrow();
+      expect(() => expect(Bun.file(tmpFile(false))).toHaveLength(0)).toThrow();
 
       // Blob
       expect(new Blob(ANY([1, 2, 3]))).toHaveLength(3);
@@ -2406,7 +2547,16 @@ describe("expect()", () => {
     expect(o).not.toContainKey({ a: "foo" });
     expect(() => {
       expect(undefined).not.toContainKey(["id"]);
-    }).toThrow("undefined is not an object");
+    }).toThrow(isBun ? "Expected value must be an object\nReceived: undefined" : "undefined is not an object");
+  });
+
+  test("toContainAllKeys", () => {
+    expect({ a: "hello", b: "world" }).toContainAllKeys(["a", "b"]);
+    expect({ a: "hello", b: "world" }).toContainAllKeys(["b", "a"]);
+    expect({ 1: "hello", b: "world" }).toContainAllKeys(["1", "b"]);
+    expect({ a: "hello", b: "world" }).not.toContainAllKeys(["c"]);
+    expect({ a: "hello", b: "world" }).not.toContainAllKeys(["a"]);
+    expect({ "": "hello", b: "world" }).toContainAllKeys(["", "b"]);
   });
 
   test("toContainAnyKeys", () => {
@@ -2437,6 +2587,152 @@ describe("expect()", () => {
     expect(() => {
       expect(null).toContainKeys(["id"]);
     }).toThrow(/(Received:)(.*null)/);
+  });
+
+  test("toContainValue", () => {
+    const shallow = { hello: "world" };
+    const deep = { message: shallow };
+    const deepArray = { message: [shallow] };
+    const o = { a: "foo", b: [1, "hello", true], c: "baz" };
+
+    expect(shallow).toContainValue("world");
+    expect({ foo: false }).toContainValue(false);
+    expect(deep).toContainValue({ hello: "world" });
+    expect(deepArray).toContainValue([{ hello: "world" }]);
+
+    expect(o).toContainValue("foo");
+    expect(o).toContainValue([1, "hello", true]);
+    expect(o).not.toContainValue("qux");
+
+    expect(shallow).not.toContainValue("foo");
+    expect(deep).not.toContainValue({ foo: "bar" });
+    expect(deepArray).not.toContainValue([{ foo: "bar" }]);
+  });
+
+  test("toContainValues", () => {
+    const shallow = {
+      hello: "world",
+      foo: 0,
+      bar: false,
+    };
+    const deep = {
+      message: shallow,
+      donald: "duck",
+    };
+    const deepArray = {
+      message: [shallow],
+      donald: "duck",
+    };
+
+    expect(shallow).toContainValues(["world", false]);
+    expect(deep).toContainValues([{ hello: "world", foo: 0, bar: false }, "duck"]);
+    expect(deepArray).toContainValues(["duck", [{ hello: "world", foo: 0, bar: false }]]);
+
+    let o = {
+      a: "foo",
+      b: "bar",
+      c: "baz",
+      d: [{ a: "hii", b: "hello" }],
+      e: [1, 2],
+      f: 100,
+      g: 20n,
+      h: 20.5,
+    };
+    expect(o).toContainValues([100]);
+    expect(o).toContainValues(["foo", [{ a: "hii", b: "hello" }]]);
+    expect(o).toContainValues(["foo", [1, 2]]);
+    expect(o).toContainValues(["foo"]);
+    expect(o).toContainValues([20n]);
+    expect(o).toContainValues([20.5]);
+    expect(o).toContainValues(["foo"]);
+    expect(o).toContainValues(["foo", [{ a: "hii", b: "hello" }]]);
+    expect(o).toContainValues(["baz", "bar", "foo"]);
+    expect(o).toContainValues(["baz", "bar", "foo", [1, 2]]);
+    expect(o).not.toContainValues(["qux", "foo"]);
+
+    expect(shallow).not.toContainValues(["foo", 0]);
+    expect(deep).not.toContainValues(["duck", { foo: "bar" }]);
+    expect(deepArray).not.toContainValues(["duck", [{ foo: "bar" }]]);
+
+    let data = { a: "foo", b: "bar", c: "baz" };
+    expect(data).toContainValues(["foo"]);
+    expect(data).toContainValues([]);
+    expect(data).toContainValues(["baz", "bar", "foo"]);
+    expect(data).not.toContainValues(["qux", "foo"]);
+  });
+
+  test("toContainAllValues", () => {
+    let o = { a: "foo", b: "bar", c: "baz" };
+    expect(o).toContainAllValues(["foo", "bar", "baz"]);
+    expect(o).toContainAllValues(["baz", "bar", "foo"]);
+    expect(o).not.toContainAllValues(["bar", "foo"]);
+
+    o = {
+      a: "foo",
+      b: "bar",
+      c: "baz",
+      d: [{ a: "hii", b: "hello" }],
+      e: [1, 2],
+      f: 100,
+      g: 20n,
+      h: 20.5,
+    };
+    expect(o).toContainAllValues(["foo", "bar", "baz", [{ a: "hii", b: "hello" }], [1, 2], 100, 20n, 20.5]);
+    expect(o).not.toContainAllValues(["foo", [{ a: "hii", b: "hello" }]]);
+
+    const shallow = {
+      hello: "world",
+      foo: 0,
+      bar: false,
+    };
+    const deep = {
+      message: shallow,
+      donald: "duck",
+    };
+    const deepArray = {
+      message: [shallow],
+      donald: "duck",
+    };
+
+    expect(shallow).toContainAllValues(["world", 0, false]);
+    expect(shallow).not.toContainAllValues(["world", false]);
+    expect(deep).toContainAllValues([{ hello: "world", foo: 0, bar: false }, "duck"]);
+    expect(deepArray).toContainAllValues(["duck", [{ hello: "world", foo: 0, bar: false }]]);
+
+    //NOT
+    expect(shallow).not.toContainAllValues(["foo", 0]);
+    expect(deep).not.toContainAllValues(["duck", { foo: "bar" }]);
+    expect(deepArray).not.toContainAllValues(["duck", [{ foo: "bar" }]]);
+  });
+
+  test("toContainAnyValues", () => {
+    let o = { a: "foo", b: "bar", c: "baz" };
+    expect(o).toContainAnyValues(["qux", "foo"]);
+    expect(o).toContainAnyValues(["qux", "bar"]);
+    expect(o).toContainAnyValues(["qux", "baz"]);
+    expect(o).toContainAnyValues(["foo"]);
+    expect(o).toContainAnyValues(["foo", "fax"]);
+    expect(o).toContainAnyValues(["qux", "bar"]);
+    expect(o).toContainAnyValues(["qux", "baz", "rod"]);
+    expect(o).not.toContainAnyValues(["qux"]);
+    expect(o).not.toContainAnyValues(["bui", "mur"]);
+
+    o = {
+      a: "foo",
+      b: "bar",
+      c: "baz",
+      d: [{ a: "hii", b: "hello" }],
+      e: [1, 2],
+      f: 100,
+      g: 20n,
+      h: 20.5,
+    };
+    expect(o).toContainAnyValues(["foo"]);
+    expect(o).toContainAnyValues([[{ a: "hii", b: "hello" }]]);
+    expect(o).toContainAnyValues([[1, 2]]);
+    expect(o).toContainAnyValues([100]);
+    expect(o).toContainAnyValues([20n]);
+    expect(o).toContainAnyValues([20.5]);
   });
 
   test("toBeTruthy()", () => {
@@ -3291,14 +3587,11 @@ describe("expect()", () => {
     if (isBun) {
       values.push({
         label: `Bun.file()`,
-        value: Bun.file("/tmp/empty.txt"),
+        value: Bun.file(tmpFile(true)),
       });
     }
     for (const { label, value } of values) {
       test(label, () => {
-        if (value instanceof Blob) {
-          require("fs").writeFileSync("/tmp/empty.txt", "");
-        }
         expect(value).toBeEmpty();
       });
     }
@@ -4282,6 +4575,36 @@ describe("expect()", () => {
     expect("a").toEqual("a");
   });
 
+  test("expect.assertions doesn't throw when valid, async", async () => {
+    expect.assertions(1);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    expect("a").toEqual("a");
+  });
+
+  test("expect.assertions doesn't throw when valid, callback", done => {
+    expect.assertions(1);
+    process.nextTick(() => {
+      expect("a").toEqual("a");
+      done();
+    });
+  });
+
+  test("expect.assertions doesn't throw when valid, setImmediate", done => {
+    expect.assertions(1);
+    setImmediate(() => {
+      expect("a").toEqual("a");
+      done();
+    });
+  });
+
+  test("expect.assertions doesn't throw when valid, queueMicrotask", done => {
+    expect.assertions(1);
+    queueMicrotask(() => {
+      expect("a").toEqual("a");
+      done();
+    });
+  });
+
   test("expect.hasAssertions returns undefined", () => {
     expect(expect.hasAssertions()).toBeUndefined();
   });
@@ -4462,7 +4785,7 @@ describe("expect()", () => {
     expect(expect("abc").toMatch("a")).toBeUndefined();
   });
   test.todo("toMatchInlineSnapshot to return undefined", () => {
-    expect(expect("abc").toMatchInlineSnapshot()).toBeUndefined();
+    expect(expect("abc").toMatchInlineSnapshot('"abc"')).toBeUndefined();
   });
   test("toMatchObject to return undefined", () => {
     expect(expect({}).toMatchObject({})).toBeUndefined();
@@ -4486,14 +4809,55 @@ describe("expect()", () => {
       }).toThrow(),
     ).toBeUndefined();
   });
-  test.todo("toThrowErrorMatchingInlineSnapshot to return undefined", () => {
-    expect(expect(() => {}).toThrowErrorMatchingInlineSnapshot()).toBeUndefined();
+  test("toThrowErrorMatchingInlineSnapshot to return undefined", () => {
+    expect(
+      expect(() => {
+        throw 0;
+      }).toThrowErrorMatchingInlineSnapshot("undefined"),
+    ).toBeUndefined();
   });
-  test.todo("toThrowErrorMatchingSnapshot to return undefined", () => {
-    expect(expect(() => {}).toThrowErrorMatchingSnapshot()).toBeUndefined();
+  test("toThrowErrorMatchingSnapshot to return undefined", () => {
+    expect(
+      expect(() => {
+        throw 0;
+      }).toThrowErrorMatchingSnapshot("undefined"),
+    ).toBeUndefined();
   });
 
   test(' " " to contain ""', () => {
     expect(" ").toContain("");
   });
+
+  test("should work #13267", () => {
+    try {
+      expect(() => {
+        throw "!";
+      }).not.toThrow(/ball/);
+      throw undefined;
+    } catch (e) {
+      expect(e).toBeUndefined();
+    }
+    try {
+      expect(() => {
+        throw "ball";
+      }).not.toThrow(/ball/);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeDefined();
+      expect(e.message).toContain("Received message: ");
+      expect(e.message).toContain('"ball"');
+    }
+  });
 });
+
+function tmpFile(exists) {
+  const { join } = require("path");
+  const { tmpdir } = require("os");
+  const { mkdtempSync, writeFileSync } = require("fs");
+  const tmpDir = mkdtempSync(join(tmpdir(), "expect-"));
+  const tmpFile = join(tmpDir, "empty.txt");
+  if (exists) {
+    writeFileSync(tmpFile, "");
+  }
+  return tmpFile;
+}

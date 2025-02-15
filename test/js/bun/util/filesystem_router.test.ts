@@ -1,9 +1,8 @@
 import { FileSystemRouter } from "bun";
-import { it, expect } from "bun:test";
-import path, { dirname, resolve } from "path";
-import fs, { mkdirSync, realpathSync, rmSync } from "fs";
-import { tmpdir } from "os";
-const tempdir = realpathSync(tmpdir()) + "/";
+import { expect, it } from "bun:test";
+import fs, { mkdirSync, rmSync } from "fs";
+import { tmpdirSync } from "harness";
+import path, { dirname } from "path";
 
 function createTree(basedir: string, paths: string[]) {
   for (const end of paths) {
@@ -17,7 +16,7 @@ function createTree(basedir: string, paths: string[]) {
 }
 var count = 0;
 function make(files: string[]) {
-  const dir = (tempdir + `fs-router-test-${count++}`).replace(/\\/g, "/");
+  const dir = tmpdirSync().replaceAll("\\", "/");
   rmSync(dir, {
     recursive: true,
     force: true,
@@ -344,6 +343,31 @@ it("reload() works", () => {
   router.reload();
   expect(router.match("/posts")!.name).toBe("/posts");
 });
+
+it("reload() works with new dirs/files", () => {
+  const { dir } = make(["posts.tsx"]);
+
+  const router = new Bun.FileSystemRouter({
+    dir,
+    style: "nextjs",
+    assetPrefix: "/_next/static/",
+    origin: "https://nextjs.org",
+  });
+
+  expect(router.match("/posts")!.name).toBe("/posts");
+  createTree(dir, ['test/recursive/index.ts']);
+  router.reload();
+  expect(router.match("/test/recursive")!.name).toBe("/test/recursive");
+  rmSync(`${dir}/test/recursive`, {
+    recursive: true,
+    force: true
+  });
+  router.reload();
+  expect(router.match("/test/recursive")).toBe(null);
+  createTree(dir, ['test/test2/index.ts']);
+  router.reload();
+  expect(router.match("/test/test2")!.name).toBe("/test/test2");
+})
 
 it(".query works with dynamic routes, including params", () => {
   // set up the test

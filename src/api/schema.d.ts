@@ -28,6 +28,7 @@ export const enum Loader {
   dataurl = 12,
   text = 13,
   sqlite = 14,
+  html = 15,
 }
 export const LoaderKeys: {
   1: "jsx";
@@ -58,6 +59,8 @@ export const LoaderKeys: {
   text: "text";
   14: "sqlite";
   sqlite: "sqlite";
+  15: "html";
+  "html": "html";
 };
 export const enum FrameworkEntryPointType {
   client = 1,
@@ -355,14 +358,8 @@ export interface StackFrame {
 }
 
 export interface StackFramePosition {
-  source_offset: int32;
   line: int32;
-  line_start: int32;
-  line_stop: int32;
-  column_start: int32;
-  column_stop: int32;
-  expression_start: int32;
-  expression_stop: int32;
+  column: int32;
 }
 
 export interface SourceLine {

@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach } from "bun:test";
 import type { Server, Subprocess, WebSocketHandler } from "bun";
 import { serve, spawn } from "bun";
-import { bunEnv, bunExe, nodeExe } from "harness";
+import { afterEach, describe, expect, it } from "bun:test";
+import { bunEnv, bunExe, forceGuardMalloc } from "harness";
 import { isIP } from "node:net";
 import path from "node:path";
 
@@ -19,7 +19,7 @@ const strings = [
   {
     label: "string (utf-8)",
     message: "utf8-😶",
-    bytes: [0x75, 0x74, 0x66, 0x38, 0x2d, 0xf0, 0x9f, 0x98, 0xb6],
+    bytes: Buffer.from("utf8-😶"),
   },
 ] as const;
 
@@ -42,6 +42,7 @@ const buffers = [
 ] as const;
 
 const messages = [...strings, ...buffers] as const;
+let topicI = 0;
 
 const binaryTypes = [
   {
@@ -61,6 +62,21 @@ const binaryTypes = [
 let servers: Server[] = [];
 let clients: Subprocess[] = [];
 
+it("should work fine if you repeatedly call methods on closed websockets", async () => {
+  let env = { ...bunEnv };
+  forceGuardMalloc(env);
+
+  const { exited } = Bun.spawn({
+    cmd: [bunExe(), path.join(import.meta.dir, "websocket-server-fixture.js")],
+    env,
+    stderr: "inherit",
+    stdout: "inherit",
+    stdin: "inherit",
+  });
+
+  expect(await exited).toBe(0);
+});
+
 afterEach(() => {
   for (const server of servers) {
     server.stop(true);
@@ -70,7 +86,88 @@ afterEach(() => {
   }
 });
 
+// publish on a closed websocket
+// connecct 2 websocket clients to one server
+// wait for one to call close callback
+// publish to the other client
+// the other client should not receive the message
+// the server should not crash
+// https://github.com/oven-sh/bun/issues/4443
+it("websocket/4443", async () => {
+  var serverSockets: ServerWebSocket<unknown>[] = [];
+  var onFirstConnected = Promise.withResolvers();
+  var onSecondMessageEchoedBack = Promise.withResolvers();
+  using server = Bun.serve({
+    port: 0,
+    websocket: {
+      open(ws) {
+        serverSockets.push(ws);
+        ws.subscribe("test");
+        if (serverSockets.length === 2) {
+          onFirstConnected.resolve();
+        }
+      },
+      message(ws, message) {
+        onSecondMessageEchoedBack.resolve();
+        ws.close();
+      },
+      close(ws) {
+        ws.publish("test", "close");
+      },
+    },
+    fetch(req, server) {
+      server.upgrade(req);
+      return new Response();
+    },
+  });
+
+  var clients = [];
+  var closedCount = 0;
+  var onClientsOpened = Promise.withResolvers();
+
+  var { promise, resolve } = Promise.withResolvers();
+  for (let i = 0; i < 2; i++) {
+    const ws = new WebSocket(`ws://${server.hostname}:${server.port}`);
+    ws.binaryType = "arraybuffer";
+
+    const clientSocket = new WebSocket(`ws://${server.hostname}:${server.port}`);
+    clientSocket.binaryType = "arraybuffer";
+    clientSocket.onopen = () => {
+      clients.push(clientSocket);
+      if (clients.length === 2) {
+        onClientsOpened.resolve();
+      }
+    };
+    clientSocket.onmessage = e => {
+      clientSocket.send(e.data);
+    };
+    clientSocket.onclose = () => {
+      if (closedCount++ === 1) {
+        resolve();
+      }
+    };
+  }
+
+  await Promise.all([onFirstConnected.promise, onClientsOpened.promise]);
+  clients[0].close();
+  await promise;
+});
+
 describe("Server", () => {
+  test("subscribe", done => ({
+    open(ws) {
+      expect(() => ws.subscribe("")).toThrow("subscribe requires a non-empty topic name");
+      ws.subscribe("topic");
+      expect(ws.isSubscribed("topic")).toBeTrue();
+      ws.unsubscribe("topic");
+      expect(ws.isSubscribed("topic")).toBeFalse();
+      ws.close();
+    },
+    close(ws, code, reason) {
+      done();
+    },
+  }));
+
   describe("websocket", () => {
     test("open", done => ({
       open(ws) {
@@ -185,29 +282,28 @@ describe("Server", () => {
     // FIXME: close() callback is called, but only after timeout?
     it.todo("closeOnBackpressureLimit");
     /*
-    test("closeOnBackpressureLimit", done => ({
-      closeOnBackpressureLimit: true,
-      backpressureLimit: 1,
-      open(ws) {
-        const data = new Uint8Array(1 * 1024 * 1024);
-        // send data until backpressure is triggered
-        for (let i = 0; i < 10; i++) {
-          if (ws.send(data) < 1) {
-            return;
+      test("closeOnBackpressureLimit", done => ({
+        closeOnBackpressureLimit: true,
+        backpressureLimit: 1,
+        open(ws) {
+          const data = new Uint8Array(1 * 1024 * 1024);
+          // send data until backpressure is triggered
+          for (let i = 0; i < 10; i++) {
+            if (ws.send(data) < 1) {
+              return;
+            }
           }
-        }
-        done(new Error("backpressure not triggered"));
-      },
-      close(_, code) {
-        expect(code).toBe(1006);
-        done();
-      },
-    }));
-    */
+          done(new Error("backpressure not triggered"));
+        },
+        close(_, code) {
+          expect(code).toBe(1006);
+          done();
+        },
+      }));
+      */
     it.todo("perMessageDeflate");
   });
 });
-
 describe("ServerWebSocket", () => {
   test("readyState", done => ({
     open(ws) {
@@ -308,7 +404,6 @@ describe("ServerWebSocket", () => {
       30_000,
     );
   });
-
   test("send/sendText/sendBinary error on invalid arguments", done => ({
     open(ws) {
       // @ts-expect-error
@@ -348,45 +443,63 @@ describe("ServerWebSocket", () => {
   });
   describe("subscribe()", () => {
     for (const { label, message } of strings) {
+      const topic = label + topicI++;
       test(label, done => ({
         open(ws) {
-          expect(ws.isSubscribed(message)).toBeFalse();
-          ws.subscribe(message);
-          expect(ws.isSubscribed(message)).toBeTrue();
-          ws.unsubscribe(message);
-          expect(ws.isSubscribed(message)).toBeFalse();
+          expect(ws.isSubscribed(topic)).toBeFalse();
+          ws.subscribe(topic);
+          expect(ws.isSubscribed(topic)).toBeTrue();
+          ws.unsubscribe(topic);
+          expect(ws.isSubscribed(topic)).toBeFalse();
           done();
         },
       }));
     }
   });
   describe("publish()", () => {
-    for (const { label, message, bytes } of messages) {
-      const topic = typeof message === "string" ? message : label;
-      test(label, (done, connect) => ({
-        async open(ws) {
-          ws.subscribe(topic);
-          if (ws.data.id === 0) {
-            connect();
-          } else if (ws.data.id === 1) {
-            ws.publish(topic, message);
-          }
-        },
-        message(ws, received) {
-          if (ws.data.id === 1) {
-            throw new Error("Expected publish() to not send to self");
-          }
-          if (typeof message === "string") {
-            expect(received).toBe(message);
-          } else {
-            expect(received).toEqual(Buffer.from(bytes));
-          }
-          done();
-        },
-      }));
+    for (const [group, messages] of [
+      ["strings", strings],
+      ["buffers", buffers],
+    ] as const) {
+      describe(group, () => {
+        for (const { label, message, bytes } of messages) {
+          const topic = label + topicI++;
+          let didSend = false;
+          const send = ws => {
+            if (ws.data.id === 1 && !didSend) {
+              if (ws.publish(topic, message)) {
+                didSend = true;
+              }
+            }
+          };
+          test(label, (done, connect) => ({
+            async open(ws) {
+              ws.subscribe(topic);
+              if (ws.data.id === 0) {
+                await connect();
+              } else {
+                send(ws);
+              }
+            },
+            drain(ws) {
+              send(ws);
+            },
+            message(ws, received) {
+              if (ws.data.id === 1) {
+                throw new Error("Expected publish() to not send to self");
+              }
+              if (typeof message === "string") {
+                expect(received).toBe(message);
+              } else {
+                expect(received).toEqual(Buffer.from(bytes));
+              }
+              done();
+            },
+          }));
+        }
+      });
     }
   });
-
   test("publish/publishText/publishBinary error on invalid arguments", done => ({
     async open(ws) {
       // @ts-expect-error
@@ -402,17 +515,28 @@ describe("ServerWebSocket", () => {
       done();
     },
   }));
-
   describe("publishBinary()", () => {
     for (const { label, message, bytes } of buffers) {
+      const topic = label + topicI++;
+      let didSend = false;
+      const send = ws => {
+        if (ws.data.id === 1 && !didSend) {
+          if (ws.publishBinary(topic, message)) {
+            didSend = true;
+          }
+        }
+      };
       test(label, (done, connect) => ({
         async open(ws) {
-          ws.subscribe(label);
+          ws.subscribe(topic);
           if (ws.data.id === 0) {
-            connect();
-          } else if (ws.data.id === 1) {
-            ws.publishBinary(label, message);
+            await connect();
+          } else {
+            send(ws);
           }
+        },
+        drain(ws) {
+          send(ws);
         },
         message(ws, received) {
           if (ws.data.id === 1) {
@@ -425,15 +549,29 @@ describe("ServerWebSocket", () => {
     }
   });
   describe("publishText()", () => {
-    for (const { label, message } of strings) {
-      test(label, (done, connect) => ({
-        async open(ws) {
-          ws.subscribe(label);
-          if (ws.data.id === 0) {
-            connect();
-          } else if (ws.data.id === 1) {
-            ws.publishText(label, message);
+    for (let { label, message } of strings) {
+      const topic = label + topicI++;
+      let didSend = false;
+      const send = ws => {
+        if (ws.data.id === 1 && !didSend) {
+          if (ws.publishText(topic, message)) {
+            didSend = true;
           }
+        }
+      };
+      test(label, (done, connect, options) => ({
+        async open(ws) {
+          const initial = options.server.subscriberCount(topic);
+          ws.subscribe(topic);
+          expect(options.server.subscriberCount(topic)).toBe(initial + 1);
+          if (ws.data.id === 0) {
+            await connect();
+          } else if (ws.data.id === 1) {
+            send(ws);
+          }
+        },
+        drain(ws) {
+          send(ws);
         },
         message(ws, received) {
           if (ws.data.id === 1) {
@@ -447,12 +585,25 @@ describe("ServerWebSocket", () => {
   });
   describe("publish() with { publishToSelf: true }", () => {
     for (const { label, message, bytes } of messages) {
-      const topic = typeof message === "string" ? message : label;
-      test(label, done => ({
+      const topic = label + topicI++;
+      let didSend = false;
+      const send = ws => {
+        if (!didSend) {
+          if (ws.publish(topic, message)) {
+            didSend = true;
+          }
+        }
+      };
+      test(label, (done, _, options) => ({
         publishToSelf: true,
         async open(ws) {
+          const initial = options.server.subscriberCount(topic);
           ws.subscribe(topic);
-          ws.publish(topic, message);
+          expect(options.server.subscriberCount(topic)).toBe(initial + 1);
+          send(ws);
+        },
+        drain(ws) {
+          send(ws);
         },
         message(_, received) {
           if (typeof message === "string") {
@@ -513,6 +664,15 @@ describe("ServerWebSocket", () => {
     let count = 0;
     return {
       open(ws) {
+        expect(() => ws.cork()).toThrow();
+        expect(() => ws.cork(undefined)).toThrow();
+        expect(() => ws.cork({})).toThrow();
+        expect(() =>
+          ws.cork(() => {
+            throw new Error("boom");
+          }),
+        ).toThrow();
+
         setTimeout(() => {
           ws.cork(() => {
             ws.send("1");
@@ -567,9 +727,11 @@ describe("ServerWebSocket", () => {
       }));
     }
   });
-  test("terminate()", done => ({
+  test("terminate() on next tick", done => ({
     open(ws) {
-      ws.terminate();
+      setTimeout(() => {
+        ws.terminate();
+      });
     },
     close(_, code, reason) {
       expect(code).toBe(1006);
@@ -577,16 +739,38 @@ describe("ServerWebSocket", () => {
       done();
     },
   }));
+  // TODO: terminate() inside open() doesn't call close().
+  it.todo("terminate() inside open() calls close()");
+  // test("terminate() immediately", done => ({
+  //   open(ws) {
+  //     ws.terminate();
+  //   },
+  //   close(_, code, reason) {
+  //     console.log(code, reason);
+  //     try {
+  //       expect(code).toBe(1006);
+  //       expect(reason).toBeEmpty();
+  //     } catch (e) {
+  //       done(e);
+  //       return;
+  //     }
+  //     done();
+  //   },
+  // }));
 });
 
 function test(
   label: string,
-  fn: (done: (err?: unknown) => void, connect: () => Promise<void>) => Partial<WebSocketHandler<{ id: number }>>,
+  fn: (
+    done: (err?: unknown) => void,
+    connect: () => Promise<void>,
+    options: { server: Server },
+  ) => Partial<WebSocketHandler<{ id: number }>>,
   timeout?: number,
 ) {
   it(
     label,
-    testDone => {
+    async testDone => {
       let isDone = false;
       const done = (err?: unknown) => {
         if (!isDone) {
@@ -596,6 +780,9 @@ function test(
         }
       };
       let id = 0;
+      var options = {
+        server: undefined,
+      };
       const server: Server = serve({
         port: 0,
         fetch(request, server) {
@@ -608,11 +795,12 @@ function test(
         websocket: {
           sendPings: false,
           message() {},
-          ...fn(done, () => connect(server)),
+          ...fn(done, () => connect(server), options as any),
         },
       });
-      servers.push(server);
-      connect(server);
+      options.server = server;
+      expect(server.subscriberCount("empty topic")).toBe(0);
+      await connect(server);
     },
     { timeout: timeout ?? 1000 },
   );
@@ -621,17 +809,29 @@ function test(
 async function connect(server: Server): Promise<void> {
   const url = new URL(`ws://${server.hostname}:${server.port}/`);
   const pathname = path.resolve(import.meta.dir, "./websocket-client-echo.mjs");
-  // @ts-ignore
+  const { promise, resolve } = Promise.withResolvers();
   const client = spawn({
-    cmd: [nodeExe() ?? bunExe(), pathname, url],
+    cmd: [bunExe(), pathname, url.href],
     cwd: import.meta.dir,
     env: { ...bunEnv, "LOG_MESSAGES": "0" },
-    stdio: ["inherit", "pipe", "inherit"],
+    stdio: ["inherit", "inherit", "inherit"],
+    ipc(message) {
+      if (message === "connected") {
+        resolve();
+      }
+    },
+    serialization: "json",
   });
   clients.push(client);
-  for await (const chunk of client.stdout) {
-    if (new TextDecoder().decode(chunk).includes("Connected")) {
-      return;
-    }
-  }
+  await promise;
 }
+
+it("you can call server.subscriberCount() when its not a websocket server", async () => {
+  using server = serve({
+    port: 0,
+    fetch(request, server) {
+      return new Response();
+    },
+  });
+  expect(server.subscriberCount("boop")).toBe(0);
+});

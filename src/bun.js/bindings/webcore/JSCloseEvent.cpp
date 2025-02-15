@@ -50,7 +50,7 @@ using namespace JSC;
 
 template<> CloseEvent::Init convertDictionary<CloseEvent::Init>(JSGlobalObject& lexicalGlobalObject, JSValue value)
 {
-    VM& vm = JSC::getVM(&lexicalGlobalObject);
+    auto& vm = JSC::getVM(&lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     bool isNullOrUndefined = value.isUndefinedOrNull();
     auto* object = isNullOrUndefined ? nullptr : value.getObject();
@@ -177,7 +177,7 @@ using JSCloseEventDOMConstructor = JSDOMConstructor<JSCloseEvent>;
 
 template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSCloseEventDOMConstructor::construct(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame)
 {
-    VM& vm = lexicalGlobalObject->vm();
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* castedThis = jsCast<JSCloseEventDOMConstructor*>(callFrame->jsCallee());
     ASSERT(castedThis);
@@ -185,10 +185,10 @@ template<> JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES JSCloseEventDOMConstruct
         return throwVMError(lexicalGlobalObject, throwScope, createNotEnoughArgumentsError(lexicalGlobalObject));
     EnsureStillAliveScope argument0 = callFrame->uncheckedArgument(0);
     auto type = convert<IDLAtomStringAdaptor<IDLDOMString>>(*lexicalGlobalObject, argument0.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     EnsureStillAliveScope argument1 = callFrame->argument(1);
     auto eventInitDict = convert<IDLDictionary<CloseEvent::Init>>(*lexicalGlobalObject, argument1.value());
-    RETURN_IF_EXCEPTION(throwScope, encodedJSValue());
+    RETURN_IF_EXCEPTION(throwScope, {});
     auto object = CloseEvent::create(WTFMove(type), WTFMove(eventInitDict));
     if constexpr (IsExceptionOr<decltype(object)>)
         RETURN_IF_EXCEPTION(throwScope, {});
@@ -268,7 +268,7 @@ JSValue JSCloseEvent::getConstructor(VM& vm, const JSGlobalObject* globalObject)
 
 JSC_DEFINE_CUSTOM_GETTER(jsCloseEventConstructor, (JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue, PropertyName))
 {
-    VM& vm = JSC::getVM(lexicalGlobalObject);
+    auto& vm = JSC::getVM(lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     auto* prototype = jsDynamicCast<JSCloseEventPrototype*>(JSValue::decode(thisValue));
     if (UNLIKELY(!prototype))
@@ -330,7 +330,7 @@ void JSCloseEvent::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     auto* thisObject = jsCast<JSCloseEvent*>(cell);
     analyzer.setWrappedObjectForCell(cell, &thisObject->wrapped());
     if (thisObject->scriptExecutionContext())
-        analyzer.setLabelForCell(cell, "url " + thisObject->scriptExecutionContext()->url().string());
+        analyzer.setLabelForCell(cell, makeString("url "_s, thisObject->scriptExecutionContext()->url().string()));
     Base::analyzeHeap(cell, analyzer);
 }
 
@@ -352,18 +352,18 @@ JSC::JSValue toJSNewlyCreated(JSC::JSGlobalObject*, JSDOMGlobalObject* globalObj
 
     if constexpr (std::is_polymorphic_v<CloseEvent>) {
 #if ENABLE(BINDING_INTEGRITY)
-        const void* actualVTablePointer = getVTablePointer(impl.ptr());
+        // const void* actualVTablePointer = getVTablePointer(impl.ptr());
 #if PLATFORM(WIN)
         void* expectedVTablePointer = __identifier("??_7CloseEvent@WebCore@@6B@");
 #else
-        void* expectedVTablePointer = &_ZTVN7WebCore10CloseEventE[2];
+        // void* expectedVTablePointer = &_ZTVN7WebCore10CloseEventE[2];
 #endif
 
         // If you hit this assertion you either have a use after free bug, or
         // CloseEvent has subclasses. If CloseEvent has subclasses that get passed
         // to toJS() we currently require CloseEvent you to opt out of binding hardening
         // by adding the SkipVTableValidation attribute to the interface IDL definition
-        RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+        // RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
 #endif
     }
     return createWrapper<CloseEvent>(globalObject, WTFMove(impl));

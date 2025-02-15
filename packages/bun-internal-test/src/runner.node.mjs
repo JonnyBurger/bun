@@ -152,9 +152,9 @@ function getMaxFileDescriptor(path) {
 
   hasInitialMaxFD = true;
 
-  if (process.platform === "linux") {
+  if (process.platform === "linux" || process.platform === "darwin") {
     try {
-      readdirSync("/proc/self/fd").forEach(name => {
+      readdirSync(process.platform === "darwin" ? "/dev/fd" : "/proc/self/fd").forEach(name => {
         const fd = parseInt(name.trim(), 10);
         if (Number.isSafeInteger(fd) && fd >= 0) {
           maxFd = Math.max(maxFd, fd);
@@ -186,7 +186,7 @@ function checkSlowTests() {
       );
       proc?.stdout?.destroy?.();
       proc?.stderr?.destroy?.();
-      proc?.kill?.();
+      proc?.kill?.(9);
     } else if (now - start > SHORT_TIMEOUT_DURATION) {
       console.error(
         `\x1b[33mwarning\x1b[0;2m:\x1b[0m Test ${JSON.stringify(path)} has been running for ${Math.ceil(
@@ -239,7 +239,7 @@ Starting "${testFileName}"
           GITHUB_ACTIONS: process.env.GITHUB_ACTIONS ?? "true",
           BUN_DEBUG_QUIET_LOGS: "1",
           BUN_INSTALL_CACHE_DIR: join(TMPDIR, ".bun-install-cache"),
-          BUN_ENABLE_CRASH_REPORTING: "1",
+          BUN_ENABLE_CRASH_REPORTING: "0",
           [windows ? "TEMP" : "TMPDIR"]: TMPDIR,
         },
       });
@@ -419,16 +419,10 @@ function linkToGH(linkTo) {
   return `https://github.com/oven-sh/bun/blob/${git_sha}/${linkTo}`;
 }
 
-function sectionLink(linkTo) {
-  return "#" + linkTo.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase();
-}
-
 failing_tests.sort((a, b) => a.path.localeCompare(b.path));
 passing_tests.sort((a, b) => a.localeCompare(b));
 
-const failingTestDisplay = failing_tests
-  .map(({ path, reason }) => `- [\`${path}\`](${sectionLink(path)})${reason ? ` ${reason}` : ""}`)
-  .join("\n");
+const failingTestDisplay = failing_tests.map(({ path, reason }) => `- \`${path}\` ${reason}`).join("\n");
 
 // const passingTestDisplay = passing_tests.map(path => `- \`${path}\``).join("\n");
 

@@ -42,7 +42,7 @@ using namespace JSC;
 
 template<> JsonWebKey convertDictionary<JsonWebKey>(JSGlobalObject& lexicalGlobalObject, JSValue value)
 {
-    VM& vm = JSC::getVM(&lexicalGlobalObject);
+    auto& vm = JSC::getVM(&lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     bool isNullOrUndefined = value.isUndefinedOrNull();
     auto* object = isNullOrUndefined ? nullptr : value.getObject();
@@ -161,7 +161,7 @@ template<> JsonWebKey convertDictionary<JsonWebKey>(JSGlobalObject& lexicalGloba
         result.kty = convert<IDLDOMString>(lexicalGlobalObject, ktyValue);
         RETURN_IF_EXCEPTION(throwScope, {});
     } else {
-        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "kty", "JsonWebKey", "DOMString");
+        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "kty"_s, "JsonWebKey"_s, "DOMString"_s);
         return {};
     }
     JSValue nValue;

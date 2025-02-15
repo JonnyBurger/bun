@@ -1,4 +1,4 @@
-Bun ships as a single executable that can be installed a few different ways.
+Bun ships as a single executable with no dependencies that can be installed a few different ways.
 
 ## Installing
 
@@ -14,7 +14,7 @@ Kernel version 5.6 or higher is strongly recommended, but the minimum is 5.1. Us
 ```bash#macOS/Linux_(curl)
 $ curl -fsSL https://bun.sh/install | bash # for macOS, Linux, and WSL
 # to install a specific version
-$ curl -fsSL https://bun.sh/install | bash -s "bun-v1.0.0"
+$ curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_LATEST_VERSION"
 ```
 
 ```bash#npm
@@ -30,17 +30,9 @@ $ docker pull oven/bun
 $ docker run --rm --init --ulimit memlock=-1:-1 oven/bun
 ```
 
-```bash#Proto
-$ proto install bun
-```
-
 {% /codetabs %}
 
 ### Windows
-
-{% callout %}
-Bun requires a minimum of Windows 10 version 1809
-{% /callout %}
 
 To install, paste this into a terminal:
 
@@ -60,6 +52,10 @@ To install, paste this into a terminal:
 
 {% /codetabs %}
 
+{% callout %}
+Bun requires a minimum of Windows 10 version 1809
+{% /callout %}
+
 For support and discussion, please join the [#windows channel on our Discord](http://bun.sh/discord).
 
 ## Docker
@@ -76,8 +72,8 @@ There are also image variants for different operating systems.
 ```bash
 $ docker pull oven/bun:debian
 $ docker pull oven/bun:slim
-$ docker pull oven/bun:alpine
 $ docker pull oven/bun:distroless
+$ docker pull oven/bun:alpine
 ```
 
 ## Checking installation
@@ -98,7 +94,9 @@ $ bun --revision
 
 If you've installed Bun but are seeing a `command not found` error, you may have to manually add the installation directory (`~/.bun/bin`) to your `PATH`.
 
-{% details summary="How to add to your `PATH`" %}
+### How to add your `PATH`
+
+{% details summary="Linux / Mac" %}
 First, determine what shell you're using:
 
 ```sh
@@ -133,6 +131,26 @@ Save the file. You'll need to open a new shell/terminal window for the changes t
 
 {% /details %}
 
+{% details summary="Windows" %}
+First, determine if the bun binary is properly installed on your system:
+
+```pwsh
+& "$env:USERPROFILE\.bun\bin\bun" --version
+```
+
+If the command runs successfully but `bun --version` is not recognized, it means that bun is not in your system's `PATH`. To fix this, open a Powershell terminal and run the following command:
+
+```pwsh
+[System.Environment]::SetEnvironmentVariable(
+    "Path",
+    [System.Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.bun\bin",
+    [System.EnvironmentVariableTarget]::User
+)
+```
+After running the command, restart your terminal and test with `bun --version`
+
+{% /details %}
+
 ## Upgrading
 
 Once installed, the binary can upgrade itself.
@@ -144,10 +162,11 @@ $ bun upgrade
 {% callout %}
 **Homebrew users** — To avoid conflicts with Homebrew, use `brew upgrade bun` instead.
 
-**Scoop users** — To avoid conflicts with Scoop, use `scoop upgrade bun` instead.
+**Scoop users** — To avoid conflicts with Scoop, use `scoop update bun` instead.
 
-**proto users** - Use `proto install bun --pin` instead.
 {% /callout %}
+
+## Canary builds
 
 Bun automatically releases an (untested) canary build on every commit to `main`. To upgrade to the latest canary build:
 
@@ -155,11 +174,56 @@ Bun automatically releases an (untested) canary build on every commit to `main`.
 $ bun upgrade --canary
 ```
 
+The canary build is useful for testing new features and bug fixes before they're released in a stable build. To help the Bun team fix bugs faster, canary builds automatically upload crash reports to Bun's team.
+
 [View canary build](https://github.com/oven-sh/bun/releases/tag/canary)
 
 {% callout %}
-**Note** — To switch back to a stable release from canary, run `bun upgrade` again with no flags.
+**Note** — To switch back to a stable release from canary, run `bun upgrade --stable`.
 {% /callout %}
+
+## Installing older versions of Bun
+
+Since Bun is a single binary, you can install older versions of Bun by re-running the installer script with a specific version.
+
+### Installing a specific version of Bun on Linux/Mac
+
+To install a specific version of Bun, you can pass the git tag of the version you want to install to the install script, such as `bun-v1.2.0` or `bun-v$BUN_LATEST_VERSION`.
+
+```sh
+$ curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_LATEST_VERSION"
+```
+
+### Installing a specific version of Bun on Windows
+
+On Windows, you can install a specific version of Bun by passing the version number to the Powershell install script.
+
+```sh
+# PowerShell:
+$ iex "& {$(irm https://bun.sh/install.ps1)} -Version $BUN_LATEST_VERSION"
+```
+
+## Downloading Bun binaries directly
+
+To download Bun binaries directly, you can visit the [releases page](https://github.com/oven-sh/bun/releases) page on GitHub.
+
+For convenience, here are download links for the latest version:
+
+- [`bun-linux-x64.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip)
+- [`bun-linux-x64-baseline.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64-baseline.zip)
+- [`bun-linux-x64-musl.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64-musl.zip)
+- [`bun-linux-x64-musl-baseline.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64-musl-baseline.zip)
+- [`bun-windows-x64.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip)
+- [`bun-windows-x64-baseline.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64-baseline.zip)
+- [`bun-darwin-aarch64.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-aarch64.zip)
+- [`bun-linux-aarch64.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-aarch64.zip)
+- [`bun-linux-aarch64-musl.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-linux-aarch64-musl.zip)
+- [`bun-darwin-x64.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-x64.zip)
+- [`bun-darwin-x64-baseline.zip`](https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-x64-baseline.zip)
+
+The `musl` binaries are built for distributions that do not ship with the glibc libraries by default, instead relying on musl. The two most popular distros are Void Linux and Alpine Linux, with the latter is used heavily in Docker containers. If you encounter an error like the following: `bun: /lib/x86_64-linux-gnu/libm.so.6: version GLIBC_2.29' not found (required by bun)`, try using the musl binary. Bun's install script automatically chooses the correct binary for your system.
+
+The `baseline` binaries are built for older CPUs which may not support AVX2 instructions. If you run into an "Illegal Instruction" error when running Bun, try using the `baseline` binaries instead. Bun's install scripts automatically chooses the correct binary for your system which helps avoid this issue. Baseline builds are slower than regular builds, so use them only if necessary.
 
 <!--
 ## Native
@@ -247,10 +311,6 @@ $ npm uninstall -g bun
 
 ```bash#Homebrew
 $ brew uninstall bun
-```
-
-```bash#Proto
-$ proto uninstall bun
 ```
 
 {% /codetabs %}

@@ -1,7 +1,5 @@
-import assert from "assert";
-import dedent from "dedent";
-import { itBundled, testForFile } from "../expectBundled";
-var { describe, test, expect } = testForFile(import.meta.path);
+import { describe } from "bun:test";
+import { itBundled } from "../expectBundled";
 
 // Tests ported from:
 // https://github.com/evanw/esbuild
@@ -434,7 +432,6 @@ describe("bundler", () => {
 
   // Use "eval" to access CommonJS variables
   itBundled("extra/CJSEval1", {
-    todo: true,
     files: {
       "in.js": `if (require('./eval').foo !== 123) throw 'fail'`,
       "eval.js": `exports.foo=234;eval('exports.foo = 123')`,
@@ -442,7 +439,6 @@ describe("bundler", () => {
     run: true,
   });
   itBundled("extra/CJSEval2", {
-    todo: true,
     files: {
       "in.js": `if (require('./eval').foo !== 123) throw 'fail'`,
       "eval.js": `module.exports={foo:234};eval('module.exports = {foo: 123}')`,

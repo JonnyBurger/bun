@@ -1,18 +1,36 @@
-import { gc as bunGC, unsafe, which } from "bun";
-import { describe, test, expect, afterAll, beforeAll } from "bun:test";
-import { readlink, readFile, writeFile } from "fs/promises";
-import { isAbsolute, join, dirname } from "path";
-import fs, { openSync, closeSync } from "node:fs";
-import os from "node:os";
+import { gc as bunGC, sleepSync, spawnSync, unsafe, which, write } from "bun";
 import { heapStats } from "bun:jsc";
+import { fork, ChildProcess } from "child_process";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile, readlink, writeFile, readdir, rm } from "fs/promises";
+import fs, { closeSync, openSync, rmSync } from "node:fs";
+import os from "node:os";
+import { dirname, isAbsolute, join } from "path";
+import detectLibc from "detect-libc";
 
 type Awaitable<T> = T | Promise<T>;
+
+export const BREAKING_CHANGES_BUN_1_2 = false;
 
 export const isMacOS = process.platform === "darwin";
 export const isLinux = process.platform === "linux";
 export const isPosix = isMacOS || isLinux;
 export const isWindows = process.platform === "win32";
 export const isIntelMacOS = isMacOS && process.arch === "x64";
+export const isDebug = Bun.version.includes("debug");
+export const isCI = process.env.CI !== undefined;
+export const libcFamily = detectLibc.familySync() as "glibc" | "musl";
+export const isMusl = isLinux && libcFamily === "musl";
+export const isGlibc = isLinux && libcFamily === "glibc";
+export const isBuildKite = process.env.BUILDKITE === "true";
+export const isVerbose = process.env.DEBUG === "1";
+
+// Use these to mark a test as flaky or broken.
+// This will help us keep track of these tests.
+//
+// test.todoIf(isFlaky && isMacOS)("this test is flaky");
+export const isFlaky = isCI;
+export const isBroken = isCI;
 
 export const bunEnv: NodeJS.ProcessEnv = {
   ...process.env,
@@ -25,7 +43,10 @@ export const bunEnv: NodeJS.ProcessEnv = {
   BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
   BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING: "1",
   BUN_GARBAGE_COLLECTOR_LEVEL: process.env.BUN_GARBAGE_COLLECTOR_LEVEL || "0",
+  BUN_FEATURE_FLAG_EXPERIMENTAL_BAKE: "1",
 };
+
+const ciEnv = { ...bunEnv };
 
 if (isWindows) {
   bunEnv.SHELLOPTS = "igncr"; // Ignore carriage return
@@ -33,12 +54,27 @@ if (isWindows) {
 
 for (let key in bunEnv) {
   if (bunEnv[key] === undefined) {
+    delete ciEnv[key];
     delete bunEnv[key];
   }
 
   if (key.startsWith("BUN_DEBUG_") && key !== "BUN_DEBUG_QUIET_LOGS") {
+    delete ciEnv[key];
     delete bunEnv[key];
   }
+
+  if (key.startsWith("BUILDKITE")) {
+    delete bunEnv[key];
+    delete process.env[key];
+  }
+}
+
+delete bunEnv.NODE_ENV;
+
+if (isDebug) {
+  // This makes debug build memory leak tests more reliable.
+  // The code for dumping out the debug build transpiled source code has leaks.
+  bunEnv.BUN_DEBUG_NO_DUMP = "1";
 }
 
 export function bunExe() {
@@ -48,6 +84,10 @@ export function bunExe() {
 
 export function nodeExe(): string | null {
   return which("node") || null;
+}
+
+export function shellExe(): string {
+  return isWindows ? "pwsh" : "bash";
 }
 
 export function gc(force = true) {
@@ -83,7 +123,7 @@ export async function expectMaxObjectTypeCount(
     await Bun.sleep(wait);
     gc();
   }
-  expect(heapStats().objectTypeCounts[type]).toBeLessThanOrEqual(count);
+  expect(heapStats().objectTypeCounts[type] || 0).toBeLessThanOrEqual(count);
 }
 
 // we must ensure that finalizers are run
@@ -116,7 +156,7 @@ export function hideFromStackTrace(block: CallableFunction) {
   });
 }
 
-type DirectoryTree = {
+export type DirectoryTree = {
   [name: string]:
     | string
     | Buffer
@@ -124,23 +164,46 @@ type DirectoryTree = {
     | ((opts: { root: string }) => Awaitable<string | Buffer | DirectoryTree>);
 };
 
-export function tempDirWithFiles(basename: string, files: DirectoryTree): string {
-  async function makeTree(base: string, tree: DirectoryTree) {
-    for (const [name, raw_contents] of Object.entries(tree)) {
-      const contents = typeof raw_contents === "function" ? await raw_contents({ root: base }) : raw_contents;
-      const joined = join(base, name);
-      if (name.includes("/")) {
-        const dir = dirname(name);
+export async function makeTree(base: string, tree: DirectoryTree) {
+  const isDirectoryTree = (value: string | DirectoryTree | Buffer): value is DirectoryTree =>
+    typeof value === "object" && value && typeof value?.byteLength === "undefined";
+
+  for (const [name, raw_contents] of Object.entries(tree)) {
+    const contents = typeof raw_contents === "function" ? await raw_contents({ root: base }) : raw_contents;
+    const joined = join(base, name);
+    if (name.includes("/")) {
+      const dir = dirname(name);
+      if (dir !== name && dir !== ".") {
         fs.mkdirSync(join(base, dir), { recursive: true });
       }
-      if (typeof contents === "object" && contents && !Buffer.isBuffer(contents)) {
-        fs.mkdirSync(joined);
-        makeTree(joined, contents);
-        continue;
-      }
-      fs.writeFileSync(joined, contents);
     }
+    if (isDirectoryTree(contents)) {
+      fs.mkdirSync(joined);
+      makeTree(joined, contents);
+      continue;
+    }
+    fs.writeFileSync(joined, contents);
   }
+}
+
+/**
+ * Recursively create files within a new temporary directory.
+ *
+ * @param basename prefix of the new temporary directory
+ * @param files directory tree. Each key is a folder or file, and each value is the contents of the file. Use objects for directories.
+ * @returns an absolute path to the new temporary directory
+ *
+ * @example
+ * ```ts
+ * const dir = tempDirWithFiles("my-test", {
+ *   "index.js": `import foo from "./src/foo";`,
+ *   "src": {
+ *     "foo.js": `export default "foo";`,
+ *   },
+ * });
+ * ```
+ */
+export function tempDirWithFiles(basename: string, files: DirectoryTree): string {
   const base = fs.mkdtempSync(join(fs.realpathSync(os.tmpdir()), basename + "_"));
   makeTree(base, files);
   return base;
@@ -268,33 +331,346 @@ export function randomPort(): number {
   return 1024 + Math.floor(Math.random() * (65535 - 1024));
 }
 
-expect.extend({
-  toRun(cmds: string[]) {
-    const result = Bun.spawnSync({
-      cmd: [bunExe(), ...cmds],
-      env: bunEnv,
-      stdio: ["inherit", "pipe", "inherit"],
-    });
+const binaryTypes = {
+  "buffer": Buffer,
+  "arraybuffer": ArrayBuffer,
+  "uint8array": Uint8Array,
+  "uint16array": Uint16Array,
+  "uint32array": Uint32Array,
+  "int8array": Int8Array,
+  "int16array": Int16Array,
+  "int32array": Int32Array,
+  "float16array": globalThis.Float16Array,
+  "float32array": Float32Array,
+  "float64array": Float64Array,
+} as const;
+if (expect.extend)
+  expect.extend({
+    toHaveTestTimedOutAfter(actual: any, expected: number) {
+      if (typeof actual !== "string") {
+        return {
+          pass: false,
+          message: () => `Expected ${actual} to be a string`,
+        };
+      }
 
-    if (result.exitCode !== 0) {
+      const preStartI = actual.indexOf("timed out after ");
+      if (preStartI === -1) {
+        return {
+          pass: false,
+          message: () => `Expected ${actual} to contain "timed out after "`,
+        };
+      }
+      const startI = preStartI + "timed out after ".length;
+      const endI = actual.indexOf("ms", startI);
+      if (endI === -1) {
+        return {
+          pass: false,
+          message: () => `Expected ${actual} to contain "ms" after "timed out after "`,
+        };
+      }
+      const int = parseInt(actual.slice(startI, endI));
+      if (!Number.isSafeInteger(int)) {
+        return {
+          pass: false,
+          message: () => `Expected ${int} to be a safe integer`,
+        };
+      }
+
+      return {
+        pass: int >= expected,
+        message: () => `Expected ${int} to be >= ${expected}`,
+      };
+    },
+    toBeBinaryType(actual: any, expected: keyof typeof binaryTypes) {
+      switch (expected) {
+        case "buffer":
+          return {
+            pass: Buffer.isBuffer(actual),
+            message: () => `Expected ${actual} to be buffer`,
+          };
+        case "arraybuffer":
+          return {
+            pass: actual instanceof ArrayBuffer,
+            message: () => `Expected ${actual} to be ArrayBuffer`,
+          };
+        default: {
+          const ctor = binaryTypes[expected];
+          if (!ctor) {
+            return {
+              pass: false,
+              message: () => `Expected ${expected} to be a binary type`,
+            };
+          }
+
+          return {
+            pass: actual instanceof ctor,
+            message: () => `Expected ${actual} to be ${expected}`,
+          };
+        }
+      }
+    },
+    toRun(cmds: string[], optionalStdout?: string, expectedCode: number = 0) {
+      const result = Bun.spawnSync({
+        cmd: [bunExe(), ...cmds],
+        env: bunEnv,
+        stdio: ["inherit", "pipe", "inherit"],
+      });
+
+      if (result.exitCode !== expectedCode) {
+        return {
+          pass: false,
+          message: () => `Command ${cmds.join(" ")} failed:` + "\n" + result.stdout.toString("utf-8"),
+        };
+      }
+
+      if (optionalStdout != null) {
+        return {
+          pass: result.stdout.toString("utf-8") === optionalStdout,
+          message: () =>
+            `Expected ${cmds.join(" ")} to output ${optionalStdout} but got ${result.stdout.toString("utf-8")}`,
+        };
+      }
+
+      return {
+        pass: true,
+        message: () => `Expected ${cmds.join(" ")} to fail`,
+      };
+    },
+    toThrowWithCode(fn: CallableFunction, cls: CallableFunction, code: string) {
+      try {
+        fn();
+        return {
+          pass: false,
+          message: () => `Received function did not throw`,
+        };
+      } catch (e) {
+        // expect(e).toBeInstanceOf(cls);
+        if (!(e instanceof cls)) {
+          return {
+            pass: false,
+            message: () => `Expected error to be instanceof ${cls.name}; got ${e.__proto__.constructor.name}`,
+          };
+        }
+
+        // expect(e).toHaveProperty("code");
+        if (!("code" in e)) {
+          return {
+            pass: false,
+            message: () => `Expected error to have property 'code'; got ${e}`,
+          };
+        }
+
+        // expect(e.code).toEqual(code);
+        if (e.code !== code) {
+          return {
+            pass: false,
+            message: () => `Expected error to have code '${code}'; got ${e.code}`,
+          };
+        }
+
+        return {
+          pass: true,
+        };
+      }
+    },
+    async toThrowWithCodeAsync(fn: CallableFunction, cls: CallableFunction, code: string) {
+      try {
+        await fn();
+        return {
+          pass: false,
+          message: () => `Received function did not throw`,
+        };
+      } catch (e) {
+        // expect(e).toBeInstanceOf(cls);
+        if (!(e instanceof cls)) {
+          return {
+            pass: false,
+            message: () => `Expected error to be instanceof ${cls.name}; got ${e.__proto__.constructor.name}`,
+          };
+        }
+
+        // expect(e).toHaveProperty("code");
+        if (!("code" in e)) {
+          return {
+            pass: false,
+            message: () => `Expected error to have property 'code'; got ${e}`,
+          };
+        }
+
+        // expect(e.code).toEqual(code);
+        if (e.code !== code) {
+          return {
+            pass: false,
+            message: () => `Expected error to have code '${code}'; got ${e.code}`,
+          };
+        }
+
+        return {
+          pass: true,
+        };
+      }
+    },
+    toBeLatin1String(actual: unknown) {
+      if ((actual as string).isLatin1()) {
+        return {
+          pass: true,
+          message: () => `Expected ${actual} to be a Latin1 string`,
+        };
+      }
+
       return {
         pass: false,
-        message: () => `Command ${cmds.join(" ")} failed:` + "\n" + result.stdout.toString("utf-8"),
+        message: () => `Expected ${actual} to be a Latin1 string`,
       };
-    }
+    },
+    toBeUTF16String(actual: unknown) {
+      if ((actual as string).isUTF16()) {
+        return {
+          pass: true,
+          message: () => `Expected ${actual} to be a UTF16 string`,
+        };
+      }
 
-    return {
-      pass: true,
-      message: () => `Expected ${cmds.join(" ")} to fail`,
-    };
-  },
-});
+      return {
+        pass: false,
+        message: () => `Expected ${actual} to be a UTF16 string`,
+      };
+    },
+  });
 
 export function ospath(path: string) {
   if (isWindows) {
     return path.replace(/\//g, "\\");
   }
   return path;
+}
+
+/**
+ * Iterates through each tree in the lockfile, checking for each package
+ * on disk. Also requires each package dependency. Not tested well for
+ * non-npm packages (links, folders, git dependencies, etc.)
+ */
+export async function toMatchNodeModulesAt(lockfile: any, root: string) {
+  function shouldSkip(pkg: any, dep: any): boolean {
+    return (
+      !pkg ||
+      !pkg.resolution ||
+      dep.behavior.optional ||
+      (dep.behavior.dev && pkg.id !== 0) ||
+      (pkg.arch && pkg.arch !== process.arch)
+    );
+  }
+  for (const { path, dependencies } of lockfile.trees) {
+    for (const { package_id, id } of Object.values(dependencies) as any[]) {
+      const treeDep = lockfile.dependencies[id];
+      const treePkg = lockfile.packages[package_id];
+      if (shouldSkip(treePkg, treeDep)) continue;
+
+      const treeDepPath = join(root, path, treeDep.name);
+
+      switch (treePkg.resolution.tag) {
+        case "npm":
+          const onDisk = await Bun.file(join(treeDepPath, "package.json")).json();
+          if (!Bun.deepMatch({ name: treePkg.name, version: treePkg.resolution.value }, onDisk)) {
+            return {
+              pass: false,
+              message: () => `
+Expected at ${join(path, treeDep.name)}: ${JSON.stringify({ name: treePkg.name, version: treePkg.resolution.value })}
+Received ${JSON.stringify({ name: onDisk.name, version: onDisk.version })}`,
+            };
+          }
+
+          // Ok, we've confirmed the package exists and has the correct version. Now go through
+          // each of its transitive dependencies and confirm the same.
+          for (const depId of treePkg.dependencies) {
+            const dep = lockfile.dependencies[depId];
+            const pkg = lockfile.packages[dep.package_id];
+            if (shouldSkip(pkg, dep)) continue;
+
+            try {
+              const resolved = await Bun.file(Bun.resolveSync(join(dep.name, "package.json"), treeDepPath)).json();
+              switch (pkg.resolution.tag) {
+                case "npm":
+                  const name = dep.is_alias ? dep.npm.name : dep.name;
+                  if (!Bun.deepMatch({ name, version: pkg.resolution.value }, resolved)) {
+                    if (dep.literal === "*") {
+                      // allow any version, just needs to be resolvable
+                      continue;
+                    }
+                    if (dep.behavior.peer && dep.npm) {
+                      // allow peer dependencies to not match exactly, but still satisfy
+                      if (Bun.semver.satisfies(pkg.resolution.value, dep.npm.version)) continue;
+                    }
+                    return {
+                      pass: false,
+                      message: () =>
+                        `Expected ${dep.name} to have version ${pkg.resolution.value} in ${treeDepPath}, but got ${resolved.version}`,
+                    };
+                  }
+                  break;
+              }
+            } catch (e) {
+              return {
+                pass: false,
+                message: () => `Expected ${dep.name} to be resolvable in ${treeDepPath}`,
+              };
+            }
+          }
+          break;
+
+        default:
+          if (!fs.existsSync(treeDepPath)) {
+            return {
+              pass: false,
+              message: () => `Expected ${treePkg.resolution.tag} "${treeDepPath}" to exist`,
+            };
+          }
+
+          for (const depId of treePkg.dependencies) {
+            const dep = lockfile.dependencies[depId];
+            const pkg = lockfile.packages[dep.package_id];
+            if (shouldSkip(pkg, dep)) continue;
+            try {
+              const resolved = await Bun.file(Bun.resolveSync(join(dep.name, "package.json"), treeDepPath)).json();
+              switch (pkg.resolution.tag) {
+                case "npm":
+                  const name = dep.is_alias ? dep.npm.name : dep.name;
+                  if (!Bun.deepMatch({ name, version: pkg.resolution.value }, resolved)) {
+                    if (dep.literal === "*") {
+                      // allow any version, just needs to be resolvable
+                      continue;
+                    }
+                    // workspaces don't need a version
+                    if (treePkg.resolution.tag === "workspace" && !resolved.version) continue;
+                    if (dep.behavior.peer && dep.npm) {
+                      // allow peer dependencies to not match exactly, but still satisfy
+                      if (Bun.semver.satisfies(pkg.resolution.value, dep.npm.version)) continue;
+                    }
+                    return {
+                      pass: false,
+                      message: () =>
+                        `Expected ${dep.name} to have version ${pkg.resolution.value} in ${treeDepPath}, but got ${resolved.version}`,
+                    };
+                  }
+                  break;
+              }
+            } catch (e) {
+              return {
+                pass: false,
+                message: () => `Expected ${dep.name} to be resolvable in ${treeDepPath}`,
+              };
+            }
+          }
+
+          break;
+      }
+    }
+  }
+
+  return {
+    pass: true,
+  };
 }
 
 export async function toHaveBins(actual: string[], expectedBins: string[]) {
@@ -338,6 +714,21 @@ export async function toBeWorkspaceLink(actual: string, expectedLinkPath: string
 }
 
 export function getMaxFD(): number {
+  if (isMacOS || isLinux) {
+    let max = -1;
+    // https://github.com/python/cpython/commit/e21a7a976a7e3368dc1eba0895e15c47cb06c810
+    for (let entry of fs.readdirSync(isMacOS ? "/dev/fd" : "/proc/self/fd")) {
+      const fd = parseInt(entry.trim(), 10);
+      if (Number.isSafeInteger(fd) && fd >= 0) {
+        max = Math.max(max, fd);
+      }
+    }
+
+    if (max >= 0) {
+      return max;
+    }
+  }
+
   const maxFD = openSync("/dev/null", "r");
   closeSync(maxFD);
   return maxFD;
@@ -351,6 +742,17 @@ declare global {
      * **INTERNAL USE ONLY, NOT An API IN BUN**
      */
     toUnixString(): string;
+  }
+
+  interface String {
+    /**
+     * **INTERNAL USE ONLY, NOT An API IN BUN**
+     */
+    isLatin1(): boolean;
+    /**
+     * **INTERNAL USE ONLY, NOT An API IN BUN**
+     */
+    isUTF16(): boolean;
   }
 }
 
@@ -648,13 +1050,555 @@ export function mergeWindowEnvs(envs: Record<string, string | undefined>[]) {
   for (const env of envs) {
     for (const key in env) {
       if (!env[key]) continue;
-      const normalized = keys[key.toUpperCase()] ?? key;
+      const normalized = (keys[key.toUpperCase()] ??= key);
       flat[normalized] = env[key];
     }
   }
   return flat;
 }
 
-export function tmpdirSync(pattern: string) {
-  return fs.mkdtempSync(join(fs.realpathSync(os.tmpdir()), pattern));
+export function tmpdirSync(pattern: string = "bun.test."): string {
+  return fs.mkdtempSync(join(fs.realpathSync.native(os.tmpdir()), pattern));
+}
+
+export async function runBunInstall(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  options?: {
+    allowWarnings?: boolean;
+    allowErrors?: boolean;
+    expectedExitCode?: number;
+    savesLockfile?: boolean;
+    production?: boolean;
+    frozenLockfile?: boolean;
+    saveTextLockfile?: boolean;
+    packages?: string[];
+    verbose?: boolean;
+  },
+) {
+  const production = options?.production ?? false;
+  const args = production ? [bunExe(), "install", "--production"] : [bunExe(), "install"];
+  if (options?.packages) {
+    args.push(...options.packages);
+  }
+  if (production) {
+    args.push("--production");
+  }
+  if (options?.frozenLockfile) {
+    args.push("--frozen-lockfile");
+  }
+  if (options?.saveTextLockfile) {
+    args.push("--save-text-lockfile");
+  }
+  if (options?.verbose) {
+    args.push("--verbose");
+  }
+  const { stdout, stderr, exited } = Bun.spawn({
+    cmd: args,
+    cwd,
+    stdout: "pipe",
+    stdin: "ignore",
+    stderr: "pipe",
+    env,
+  });
+  expect(stdout).toBeDefined();
+  expect(stderr).toBeDefined();
+  let err = stderrForInstall(await new Response(stderr).text());
+  expect(err).not.toContain("panic:");
+  if (!options?.allowErrors) {
+    expect(err).not.toContain("error:");
+  }
+  if (!options?.allowWarnings) {
+    expect(err).not.toContain("warn:");
+  }
+  if ((options?.savesLockfile ?? true) && !production) {
+    expect(err).toContain("Saved lockfile");
+  }
+  let out = await new Response(stdout).text();
+  expect(await exited).toBe(options?.expectedExitCode ?? 0);
+  return { out, err, exited };
+}
+
+// stderr with `slow filesystem` warning removed
+export function stderrForInstall(err: string) {
+  return err.replace(/warn: Slow filesystem.*/g, "");
+}
+
+export async function runBunUpdate(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  args?: string[],
+): Promise<{ out: string[]; err: string; exitCode: number }> {
+  const { stdout, stderr, exited } = Bun.spawn({
+    cmd: [bunExe(), "update", ...(args ?? [])],
+    cwd,
+    stdout: "pipe",
+    stdin: "ignore",
+    stderr: "pipe",
+    env,
+  });
+
+  let err = await Bun.readableStreamToText(stderr);
+  let out = await Bun.readableStreamToText(stdout);
+  let exitCode = await exited;
+  if (exitCode !== 0) {
+    console.log("stdout:", out);
+    console.log("stderr:", err);
+    expect().fail("bun update failed");
+  }
+
+  return { out: out.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/), err, exitCode };
+}
+
+export async function pack(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) {
+  const { stdout, stderr, exited } = Bun.spawn({
+    cmd: [bunExe(), "pm", "pack", ...args],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env,
+  });
+
+  const err = await Bun.readableStreamToText(stderr);
+  expect(err).not.toContain("error:");
+  expect(err).not.toContain("warning:");
+  expect(err).not.toContain("failed");
+  expect(err).not.toContain("panic:");
+
+  const out = await Bun.readableStreamToText(stdout);
+
+  const exitCode = await exited;
+  expect(exitCode).toBe(0);
+
+  return { out, err };
+}
+
+// If you need to modify, clone it
+export const expiredTls = Object.freeze({
+  cert: "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKLdQVPy90jjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTkwMjAzMTQ0OTM1WhcNMjAwMjAzMTQ0OTM1WjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEA7i7IIEdICTiSTVx+ma6xHxOtcbd6wGW3nkxlCkJ1UuV8NmY5ovMsGnGD\nhJJtUQ2j5ig5BcJUf3tezqCNW4tKnSOgSISfEAKvpn2BPvaFq3yx2Yjz0ruvcGKp\nDMZBXmB/AAtGyN/UFXzkrcfppmLHJTaBYGG6KnmU43gPkSDy4iw46CJFUOupc51A\nFIz7RsE7mbT1plCM8e75gfqaZSn2k+Wmy+8n1HGyYHhVISRVvPqkS7gVLSVEdTea\nUtKP1Vx/818/HDWk3oIvDVWI9CFH73elNxBkMH5zArSNIBTehdnehyAevjY4RaC/\nkK8rslO3e4EtJ9SnA4swOjCiqAIQEwIDAQABo1AwTjAdBgNVHQ4EFgQUv5rc9Smm\n9c4YnNf3hR49t4rH4yswHwYDVR0jBBgwFoAUv5rc9Smm9c4YnNf3hR49t4rH4ysw\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEATcL9CAAXg0u//eYUAlQa\nL+l8yKHS1rsq1sdmx7pvsmfZ2g8ONQGfSF3TkzkI2OOnCBokeqAYuyT8awfdNUtE\nEHOihv4ZzhK2YZVuy0fHX2d4cCFeQpdxno7aN6B37qtsLIRZxkD8PU60Dfu9ea5F\nDDynnD0TUabna6a0iGn77yD8GPhjaJMOz3gMYjQFqsKL252isDVHEDbpVxIzxPmN\nw1+WK8zRNdunAcHikeoKCuAPvlZ83gDQHp07dYdbuZvHwGj0nfxBLc9qt90XsBtC\n4IYR7c/bcLMmKXYf0qoQ4OzngsnPI5M+v9QEHvYWaKVwFY4CTcSNJEwfXw+BAeO5\nOA==\n-----END CERTIFICATE-----",
+  key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDuLsggR0gJOJJN\nXH6ZrrEfE61xt3rAZbeeTGUKQnVS5Xw2Zjmi8ywacYOEkm1RDaPmKDkFwlR/e17O\noI1bi0qdI6BIhJ8QAq+mfYE+9oWrfLHZiPPSu69wYqkMxkFeYH8AC0bI39QVfOSt\nx+mmYsclNoFgYboqeZTjeA+RIPLiLDjoIkVQ66lznUAUjPtGwTuZtPWmUIzx7vmB\n+pplKfaT5abL7yfUcbJgeFUhJFW8+qRLuBUtJUR1N5pS0o/VXH/zXz8cNaTegi8N\nVYj0IUfvd6U3EGQwfnMCtI0gFN6F2d6HIB6+NjhFoL+QryuyU7d7gS0n1KcDizA6\nMKKoAhATAgMBAAECggEAd5g/3o1MK20fcP7PhsVDpHIR9faGCVNJto9vcI5cMMqP\n6xS7PgnSDFkRC6EmiLtLn8Z0k2K3YOeGfEP7lorDZVG9KoyE/doLbpK4MfBAwBG1\nj6AHpbmd5tVzQrnNmuDjBBelbDmPWVbD0EqAFI6mphXPMqD/hFJWIz1mu52Kt2s6\n++MkdqLO0ORDNhKmzu6SADQEcJ9Suhcmv8nccMmwCsIQAUrfg3qOyqU4//8QB8ZM\njosO3gMUesihVeuF5XpptFjrAliPgw9uIG0aQkhVbf/17qy0XRi8dkqXj3efxEDp\n1LSqZjBFiqJlFchbz19clwavMF/FhxHpKIhhmkkRSQKBgQD9blaWSg/2AGNhRfpX\nYq+6yKUkUD4jL7pmX1BVca6dXqILWtHl2afWeUorgv2QaK1/MJDH9Gz9Gu58hJb3\nymdeAISwPyHp8euyLIfiXSAi+ibKXkxkl1KQSweBM2oucnLsNne6Iv6QmXPpXtro\nnTMoGQDS7HVRy1on5NQLMPbUBQKBgQDwmN+um8F3CW6ZV1ZljJm7BFAgNyJ7m/5Q\nYUcOO5rFbNsHexStrx/h8jYnpdpIVlxACjh1xIyJ3lOCSAWfBWCS6KpgeO1Y484k\nEYhGjoUsKNQia8UWVt+uWnwjVSDhQjy5/pSH9xyFrUfDg8JnSlhsy0oC0C/PBjxn\nhxmADSLnNwKBgQD2A51USVMTKC9Q50BsgeU6+bmt9aNMPvHAnPf76d5q78l4IlKt\nwMs33QgOExuYirUZSgjRwknmrbUi9QckRbxwOSqVeMOwOWLm1GmYaXRf39u2CTI5\nV9gTMHJ5jnKd4gYDnaA99eiOcBhgS+9PbgKSAyuUlWwR2ciL/4uDzaVeDQKBgDym\nvRSeTRn99bSQMMZuuD5N6wkD/RxeCbEnpKrw2aZVN63eGCtkj0v9LCu4gptjseOu\n7+a4Qplqw3B/SXN5/otqPbEOKv8Shl/PT6RBv06PiFKZClkEU2T3iH27sws2EGru\nw3C3GaiVMxcVewdg1YOvh5vH8ZVlxApxIzuFlDvnAoGAN5w+gukxd5QnP/7hcLDZ\nF+vesAykJX71AuqFXB4Wh/qFY92CSm7ImexWA/L9z461+NKeJwb64Nc53z59oA10\n/3o2OcIe44kddZXQVP6KTZBd7ySVhbtOiK3/pCy+BQRsrC7d71W914DxNWadwZ+a\njtwwKjDzmPwdIXDSQarCx0U=\n-----END PRIVATE KEY-----",
+  passphrase: "1234",
+});
+
+// ❯ openssl x509 -enddate -noout -in
+// notAfter=Sep  5 23:27:34 2025 GMT
+export const tls = Object.freeze({
+  cert: "-----BEGIN CERTIFICATE-----\nMIIDrzCCApegAwIBAgIUHaenuNcUAu0tjDZGpc7fK4EX78gwDQYJKoZIhvcNAQEL\nBQAwaTELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkNBMRYwFAYDVQQHDA1TYW4gRnJh\nbmNpc2NvMQ0wCwYDVQQKDARPdmVuMREwDwYDVQQLDAhUZWFtIEJ1bjETMBEGA1UE\nAwwKc2VydmVyLWJ1bjAeFw0yMzA5MDYyMzI3MzRaFw0yNTA5MDUyMzI3MzRaMGkx\nCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJDQTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNj\nbzENMAsGA1UECgwET3ZlbjERMA8GA1UECwwIVGVhbSBCdW4xEzARBgNVBAMMCnNl\ncnZlci1idW4wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC+7odzr3yI\nYewRNRGIubF5hzT7Bym2dDab4yhaKf5drL+rcA0J15BM8QJ9iSmL1ovg7x35Q2MB\nKw3rl/Yyy3aJS8whZTUze522El72iZbdNbS+oH6GxB2gcZB6hmUehPjHIUH4icwP\ndwVUeR6fB7vkfDddLXe0Tb4qsO1EK8H0mr5PiQSXfj39Yc1QHY7/gZ/xeSrt/6yn\n0oH9HbjF2XLSL2j6cQPKEayartHN0SwzwLi0eWSzcziVPSQV7c6Lg9UuIHbKlgOF\nzDpcp1p1lRqv2yrT25im/dS6oy9XX+p7EfZxqeqpXX2fr5WKxgnzxI3sW93PG8FU\nIDHtnUsoHX3RAgMBAAGjTzBNMCwGA1UdEQQlMCOCCWxvY2FsaG9zdIcEfwAAAYcQ\nAAAAAAAAAAAAAAAAAAAAATAdBgNVHQ4EFgQUF3y/su4J/8ScpK+rM2LwTct6EQow\nDQYJKoZIhvcNAQELBQADggEBAGWGWp59Bmrk3Gt0bidFLEbvlOgGPWCT9ZrJUjgc\nhY44E+/t4gIBdoKOSwxo1tjtz7WsC2IYReLTXh1vTsgEitk0Bf4y7P40+pBwwZwK\naeIF9+PC6ZoAkXGFRoyEalaPVQDBg/DPOMRG9OH0lKfen9OGkZxmmjRLJzbyfAhU\noI/hExIjV8vehcvaJXmkfybJDYOYkN4BCNqPQHNf87ZNdFCb9Zgxwp/Ou+47J5k4\n5plQ+K7trfKXG3ABMbOJXNt1b0sH8jnpAsyHY4DLEQqxKYADbXsr3YX/yy6c0eOo\nX2bHGD1+zGsb7lGyNyoZrCZ0233glrEM4UxmvldBcWwOWfk=\n-----END CERTIFICATE-----\n",
+  key: "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC+7odzr3yIYewR\nNRGIubF5hzT7Bym2dDab4yhaKf5drL+rcA0J15BM8QJ9iSmL1ovg7x35Q2MBKw3r\nl/Yyy3aJS8whZTUze522El72iZbdNbS+oH6GxB2gcZB6hmUehPjHIUH4icwPdwVU\neR6fB7vkfDddLXe0Tb4qsO1EK8H0mr5PiQSXfj39Yc1QHY7/gZ/xeSrt/6yn0oH9\nHbjF2XLSL2j6cQPKEayartHN0SwzwLi0eWSzcziVPSQV7c6Lg9UuIHbKlgOFzDpc\np1p1lRqv2yrT25im/dS6oy9XX+p7EfZxqeqpXX2fr5WKxgnzxI3sW93PG8FUIDHt\nnUsoHX3RAgMBAAECggEAAckMqkn+ER3c7YMsKRLc5bUE9ELe+ftUwfA6G+oXVorn\nE+uWCXGdNqI+TOZkQpurQBWn9IzTwv19QY+H740cxo0ozZVSPE4v4czIilv9XlVw\n3YCNa2uMxeqp76WMbz1xEhaFEgn6ASTVf3hxYJYKM0ljhPX8Vb8wWwlLONxr4w4X\nOnQAB5QE7i7LVRsQIpWKnGsALePeQjzhzUZDhz0UnTyGU6GfC+V+hN3RkC34A8oK\njR3/Wsjahev0Rpb+9Pbu3SgTrZTtQ+srlRrEsDG0wVqxkIk9ueSMOHlEtQ7zYZsk\nlX59Bb8LHNGQD5o+H1EDaC6OCsgzUAAJtDRZsPiZEQKBgQDs+YtVsc9RDMoC0x2y\nlVnP6IUDXt+2UXndZfJI3YS+wsfxiEkgK7G3AhjgB+C+DKEJzptVxP+212hHnXgr\n1gfW/x4g7OWBu4IxFmZ2J/Ojor+prhHJdCvD0VqnMzauzqLTe92aexiexXQGm+WW\nwRl3YZLmkft3rzs3ZPhc1G2X9QKBgQDOQq3rrxcvxSYaDZAb+6B/H7ZE4natMCiz\nLx/cWT8n+/CrJI2v3kDfdPl9yyXIOGrsqFgR3uhiUJnz+oeZFFHfYpslb8KvimHx\nKI+qcVDcprmYyXj2Lrf3fvj4pKorc+8TgOBDUpXIFhFDyM+0DmHLfq+7UqvjU9Hs\nkjER7baQ7QKBgQDTh508jU/FxWi9RL4Jnw9gaunwrEt9bxUc79dp+3J25V+c1k6Q\nDPDBr3mM4PtYKeXF30sBMKwiBf3rj0CpwI+W9ntqYIwtVbdNIfWsGtV8h9YWHG98\nJ9q5HLOS9EAnogPuS27walj7wL1k+NvjydJ1of+DGWQi3aQ6OkMIegap0QKBgBlR\nzCHLa5A8plG6an9U4z3Xubs5BZJ6//QHC+Uzu3IAFmob4Zy+Lr5/kITlpCyw6EdG\n3xDKiUJQXKW7kluzR92hMCRnVMHRvfYpoYEtydxcRxo/WS73SzQBjTSQmicdYzLE\ntkLtZ1+ZfeMRSpXy0gR198KKAnm0d2eQBqAJy0h9AoGBAM80zkd+LehBKq87Zoh7\ndtREVWslRD1C5HvFcAxYxBybcKzVpL89jIRGKB8SoZkF7edzhqvVzAMP0FFsEgCh\naClYGtO+uo+B91+5v2CCqowRJUGfbFOtCuSPR7+B3LDK8pkjK2SQ0mFPUfRA5z0z\nNVWtC0EYNBTRkqhYtqr3ZpUc\n-----END PRIVATE KEY-----\n",
+});
+
+export function disableAggressiveGCScope() {
+  const gc = Bun.unsafe.gcAggressionLevel(0);
+  return {
+    [Symbol.dispose]() {
+      Bun.unsafe.gcAggressionLevel(gc);
+    },
+  };
+}
+
+String.prototype.isLatin1 = function () {
+  return require("bun:internal-for-testing").jscInternals.isLatin1String(this);
+};
+
+String.prototype.isUTF16 = function () {
+  return require("bun:internal-for-testing").jscInternals.isUTF16String(this);
+};
+
+interface BunHarnessTestMatchers {
+  toBeLatin1String(): void;
+  toBeUTF16String(): void;
+  toHaveTestTimedOutAfter(expected: number): void;
+  toBeBinaryType(expected: keyof typeof binaryTypes): void;
+  toRun(optionalStdout?: string, expectedCode?: number): void;
+  toThrowWithCode(cls: CallableFunction, code: string): void;
+  toThrowWithCodeAsync(cls: CallableFunction, code: string): void;
+}
+
+declare module "bun:test" {
+  interface Matchers<T> extends BunHarnessTestMatchers {}
+  interface AsymmetricMatchers extends BunHarnessTestMatchers {}
+}
+
+/**
+ * Set `NODE_TLS_REJECT_UNAUTHORIZED` for a scope.
+ */
+export function rejectUnauthorizedScope(value: boolean) {
+  const original_rejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = value ? "1" : "0";
+  return {
+    [Symbol.dispose]() {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = original_rejectUnauthorized;
+    },
+  };
+}
+
+let networkInterfaces: any;
+
+function isIP(type: "IPv4" | "IPv6") {
+  if (!networkInterfaces) {
+    networkInterfaces = os.networkInterfaces();
+  }
+  for (const networkInterface of Object.values(networkInterfaces)) {
+    for (const { family } of networkInterface as any[]) {
+      if (family === type) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function isIPv6() {
+  // FIXME: AWS instances on Linux for Buildkite are not setup with IPv6
+  if (isBuildKite && isLinux) {
+    return false;
+  }
+  return isIP("IPv6");
+}
+
+export function isIPv4() {
+  return isIP("IPv4");
+}
+
+let glibcVersion: string | undefined;
+
+export function getGlibcVersion() {
+  if (glibcVersion || !isLinux) {
+    return glibcVersion;
+  }
+  try {
+    const { header } = process.report!.getReport() as any;
+    const { glibcVersionRuntime: version } = header;
+    if (typeof version === "string") {
+      return (glibcVersion = version);
+    }
+  } catch (error) {
+    console.warn("Failed to detect glibc version", error);
+  }
+}
+
+export function isGlibcVersionAtLeast(version: string): boolean {
+  const glibcVersion = getGlibcVersion();
+  if (!glibcVersion) {
+    return false;
+  }
+  return Bun.semver.satisfies(glibcVersion, `>=${version}`);
+}
+
+let macOSVersion: string | undefined;
+
+export function getMacOSVersion(): string | undefined {
+  if (macOSVersion || !isMacOS) {
+    return macOSVersion;
+  }
+  try {
+    const { stdout } = Bun.spawnSync({
+      cmd: ["sw_vers", "-productVersion"],
+    });
+    return (macOSVersion = stdout.toString().trim());
+  } catch (error) {
+    console.warn("Failed to detect macOS version:", error);
+  }
+}
+
+export function isMacOSVersionAtLeast(minVersion: number): boolean {
+  const macOSVersion = getMacOSVersion();
+  if (!macOSVersion) {
+    return false;
+  }
+  return parseFloat(macOSVersion) >= minVersion;
+}
+
+export function readableStreamFromArray(array) {
+  return new ReadableStream({
+    pull(controller) {
+      for (let entry of array) {
+        controller.enqueue(entry);
+      }
+      controller.close();
+    },
+  });
+}
+
+let hasGuardMalloc = -1;
+export function forceGuardMalloc(env) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  if (hasGuardMalloc === -1) {
+    hasGuardMalloc = Number(fs.existsSync("/usr/lib/libgmalloc.dylib"));
+  }
+
+  if (hasGuardMalloc === 1) {
+    env.DYLD_INSERT_LIBRARIES = "/usr/lib/libgmalloc.dylib";
+    env.MALLOC_PROTECT_BEFORE = "1";
+    env.MallocScribble = "1";
+    env.MallocGuardEdges = "1";
+    env.MALLOC_FILL_SPACE = "1";
+    env.MALLOC_STRICT_SIZE = "1";
+  } else {
+    console.warn("Guard malloc is not available on this platform for some reason.");
+  }
+}
+
+export function fileDescriptorLeakChecker() {
+  const initial = getMaxFD();
+  return {
+    [Symbol.dispose]() {
+      const current = getMaxFD();
+      if (current > initial) {
+        throw new Error(`File descriptor leak detected: ${current} (current) > ${initial} (initial)`);
+      }
+    },
+  };
+}
+
+/**
+ * Gets a secret from the environment.
+ *
+ * In Buildkite, secrets must be retrieved using the `buildkite-agent secret get` command
+ * and are not available as an environment variable.
+ */
+export function getSecret(name: string): string | undefined {
+  let value = process.env[name]?.trim();
+
+  // When not running in CI, allow the secret to be missing.
+  if (!isCI) {
+    return value;
+  }
+
+  // In Buildkite, secrets must be retrieved using the `buildkite-agent secret get` command
+  if (!value && isBuildKite) {
+    const { exitCode, stdout } = spawnSync({
+      cmd: ["buildkite-agent", "secret", "get", name],
+      stdout: "pipe",
+      env: ciEnv,
+      stderr: "inherit",
+    });
+    if (exitCode === 0) {
+      value = stdout.toString().trim();
+    }
+  }
+
+  // Throw an error if the secret is not found, so the test fails in CI.
+  if (!value) {
+    let hint;
+    if (isBuildKite) {
+      hint = `Create a secret with the name "${name}" in the Buildkite UI.
+https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets`;
+    } else {
+      hint = `Define an environment variable with the name "${name}".`;
+    }
+
+    throw new Error(`Secret not found: ${name}\n${hint}`);
+  }
+
+  // Set the secret in the environment so that it can be used in tests.
+  process.env[name] = value;
+
+  return value;
+}
+
+export function assertManifestsPopulated(absCachePath: string, registryUrl: string) {
+  const { npm_manifest_test_helpers } = require("bun:internal-for-testing");
+  const { parseManifest } = npm_manifest_test_helpers;
+
+  for (const file of fs.readdirSync(absCachePath)) {
+    if (!file.endsWith(".npm")) continue;
+
+    const manifest = parseManifest(join(absCachePath, file), registryUrl);
+    expect(manifest.versions.length).toBeGreaterThan(0);
+  }
+}
+
+// Make it easier to run some node tests.
+Object.defineProperty(globalThis, "gc", {
+  value: Bun.gc,
+  writable: true,
+  enumerable: false,
+  configurable: true,
+});
+
+export function waitForFileToExist(path: string, interval_ms: number) {
+  while (!fs.existsSync(path)) {
+    sleepSync(interval_ms);
+  }
+}
+
+export function libcPathForDlopen() {
+  switch (process.platform) {
+    case "linux":
+      switch (libcFamily) {
+        case "glibc":
+          return "libc.so.6";
+        case "musl":
+          return "/usr/lib/libc.so";
+      }
+    case "darwin":
+      return "libc.dylib";
+    default:
+      throw new Error("TODO");
+  }
+}
+
+export function cwdScope(cwd: string) {
+  const original = process.cwd();
+  process.chdir(cwd);
+  return {
+    [Symbol.dispose]() {
+      process.chdir(original);
+    },
+  };
+}
+
+export function rmScope(path: string) {
+  return {
+    [Symbol.dispose]() {
+      fs.rmSync(path, { recursive: true, force: true });
+    },
+  };
+}
+
+export function textLockfile(version: number, pkgs: any): string {
+  return JSON.stringify({
+    lockfileVersion: version,
+    ...pkgs,
+  });
+}
+
+export class VerdaccioRegistry {
+  port: number;
+  process: ChildProcess | undefined;
+  configPath: string;
+  packagesPath: string;
+  users: Record<string, string> = {};
+
+  constructor(opts?: { configPath?: string; packagesPath?: string; verbose?: boolean }) {
+    this.port = randomPort();
+    this.configPath = opts?.configPath ?? join(import.meta.dir, "cli", "install", "registry", "verdaccio.yaml");
+    this.packagesPath = opts?.packagesPath ?? join(import.meta.dir, "cli", "install", "registry", "packages");
+  }
+
+  async start(silent: boolean = true) {
+    await rm(join(dirname(this.configPath), "htpasswd"), { force: true });
+    this.process = fork(require.resolve("verdaccio/bin/verdaccio"), ["-c", this.configPath, "-l", `${this.port}`], {
+      silent,
+      // Prefer using a release build of Bun since it's faster
+      execPath: Bun.which("bun") || bunExe(),
+    });
+
+    this.process.stderr?.on("data", data => {
+      console.error(`[verdaccio] stderr: ${data}`);
+    });
+
+    const started = Promise.withResolvers();
+
+    this.process.on("error", error => {
+      console.error(`Failed to start verdaccio: ${error}`);
+      started.reject(error);
+    });
+
+    this.process.on("exit", (code, signal) => {
+      if (code !== 0) {
+        console.error(`Verdaccio exited with code ${code} and signal ${signal}`);
+      } else {
+        console.log("Verdaccio exited successfully");
+      }
+    });
+
+    this.process.on("message", (message: { verdaccio_started: boolean }) => {
+      if (message.verdaccio_started) {
+        started.resolve();
+      }
+    });
+
+    await started.promise;
+  }
+
+  registryUrl() {
+    return `http://localhost:${this.port}/`;
+  }
+
+  stop() {
+    rmSync(join(dirname(this.configPath), "htpasswd"), { force: true });
+    this.process?.kill(0);
+  }
+
+  /**
+   * returns auth token
+   */
+  async generateUser(username: string, password: string): Promise<string> {
+    if (this.users[username]) {
+      throw new Error(`User ${username} already exists`);
+    } else this.users[username] = password;
+
+    const url = `http://localhost:${this.port}/-/user/org.couchdb.user:${username}`;
+    const user = {
+      name: username,
+      password: password,
+      email: `${username}@example.com`,
+    };
+
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(user),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return data.token;
+    }
+
+    throw new Error("Failed to create user:", response.statusText);
+  }
+
+  async authBunfig(user: string) {
+    const authToken = await this.generateUser(user, user);
+    return `
+        [install]
+        cache = false
+        registry = { url = "http://localhost:${this.port}/", token = "${authToken}" }
+        `;
+  }
+
+  async createTestDir(bunfigOpts: BunfigOpts = {}) {
+    await rm(join(dirname(this.configPath), "htpasswd"), { force: true });
+    await rm(join(this.packagesPath, "private-pkg-dont-touch"), { force: true });
+    const packageDir = tmpdirSync();
+    const packageJson = join(packageDir, "package.json");
+    await this.writeBunfig(packageDir, bunfigOpts);
+    this.users = {};
+    return { packageDir, packageJson };
+  }
+
+  async writeBunfig(dir: string, opts: BunfigOpts = {}) {
+    let bunfig = `
+    [install]
+    cache = "${join(dir, ".bun-cache")}"
+    `;
+    if ("saveTextLockfile" in opts) {
+      bunfig += `saveTextLockfile = ${opts.saveTextLockfile}
+      `;
+    }
+    if (!opts.npm) {
+      bunfig += `registry = "${this.registryUrl()}"`;
+    }
+    await write(join(dir, "bunfig.toml"), bunfig);
+  }
+}
+
+type BunfigOpts = {
+  saveTextLockfile?: boolean;
+  npm?: boolean;
+};
+
+export async function readdirSorted(path: string): Promise<string[]> {
+  const results = await readdir(path);
+  results.sort();
+  return results;
 }

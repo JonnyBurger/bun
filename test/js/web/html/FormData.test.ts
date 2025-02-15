@@ -1,7 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it, test } from "bun:test";
-import fs, { chmodSync, unlinkSync } from "fs";
-import { gc, withoutAggressiveGC } from "harness";
-import { mkfifo } from "mkfifo";
+import { describe, expect, it, test } from "bun:test";
+import { join } from "path";
 
 describe("FormData", () => {
   it("should be able to append a string", () => {
@@ -300,7 +298,7 @@ describe("FormData", () => {
   });
 
   it("file upload on HTTP server (receive)", async () => {
-    const server = Bun.serve({
+    using server = Bun.serve({
       port: 0,
       development: false,
       async fetch(req) {
@@ -309,7 +307,7 @@ describe("FormData", () => {
       },
     });
 
-    const reqBody = new Request(`http://${server.hostname}:${server.port}`, {
+    const reqBody = new Request(server.url, {
       body: '--foo\r\nContent-Disposition: form-data; name="foo"; filename="bar"\r\n\r\nbaz\r\n--foo--\r\n\r\n',
       headers: {
         "Content-Type": "multipart/form-data; boundary=foo",
@@ -320,11 +318,10 @@ describe("FormData", () => {
     const res = await fetch(reqBody);
     const body = await res.text();
     expect(body).toBe("baz");
-    server.stop(true);
   });
 
   it("file send on HTTP server (receive)", async () => {
-    const server = Bun.serve({
+    using server = Bun.serve({
       port: 0,
       development: false,
       async fetch(req) {
@@ -333,7 +330,7 @@ describe("FormData", () => {
       },
     });
 
-    const reqBody = new Request(`http://${server.hostname}:${server.port}`, {
+    const reqBody = new Request(server.url, {
       body: '--foo\r\nContent-Disposition: form-data; name="foo"; filename="bar"\r\n\r\nbaz\r\n--foo--\r\n\r\n',
       headers: {
         "Content-Type": "multipart/form-data; boundary=foo",
@@ -344,7 +341,6 @@ describe("FormData", () => {
     const res = await fetch(reqBody);
     const body = await res.formData();
     expect(await (body.get("foo") as Blob).text()).toBe("baz");
-    server.stop(true);
   });
   type FetchReqArgs = [request: Request, init?: RequestInit];
   type FetchURLArgs = [url: string | URL | Request, init?: FetchRequestInit];
@@ -357,11 +353,19 @@ describe("FormData", () => {
           return fetch(...(args as FetchURLArgs));
         }
       }
-      for (let headers of [{} as {}, undefined, { headers: { X: "Y" } }]) {
+      for (let headers of [
+        {} as {},
+        undefined,
+        new Headers(),
+        new Headers({ x: "y" }),
+        new Headers([["x", "y"]]),
+        { X: "Y" },
+        { headers: { X: "Y" } },
+      ]) {
         describe("headers: " + Bun.inspect(headers).replaceAll(/([\n ])/gim, ""), () => {
           it("send on HTTP server with FormData & Blob (roundtrip)", async () => {
             let contentType = "";
-            const server = Bun.serve({
+            using server = Bun.serve({
               port: 0,
               development: false,
               async fetch(req) {
@@ -377,7 +381,7 @@ describe("FormData", () => {
 
             // @ts-ignore
             const reqBody: FetchURLArgs = [
-              `http://${server.hostname}:${server.port}`,
+              server.url,
               {
                 body: form,
                 headers,
@@ -388,12 +392,11 @@ describe("FormData", () => {
             const body = await res.formData();
             expect(await (body.get("foo") as Blob).text()).toBe("baz");
             expect(body.get("bar")).toBe("baz");
-            server.stop(true);
           });
 
           it("send on HTTP server with FormData & Bun.file (roundtrip)", async () => {
             let contentType = "";
-            const server = Bun.serve({
+            using server = Bun.serve({
               port: 0,
               development: false,
               async fetch(req) {
@@ -410,7 +413,7 @@ describe("FormData", () => {
             form.append("bar", "baz");
 
             const reqBody = [
-              `http://${server.hostname}:${server.port}`,
+              server.url,
               {
                 body: form,
 
@@ -424,13 +427,11 @@ describe("FormData", () => {
             expect(contentType).toContain("multipart/form-data");
             expect(body.get("bar")).toBe("baz");
             expect(contentType).toContain("multipart/form-data");
-
-            server.stop(true);
           });
 
           it("send on HTTP server with FormData (roundtrip)", async () => {
             let contentType = "";
-            const server = Bun.serve({
+            using server = Bun.serve({
               port: 0,
               development: false,
               async fetch(req) {
@@ -446,7 +447,7 @@ describe("FormData", () => {
 
             // @ts-ignore
             const reqBody = [
-              `http://${server.hostname}:${server.port}`,
+              server.url,
               {
                 body: form,
 
@@ -459,7 +460,6 @@ describe("FormData", () => {
             expect(contentType).toContain("multipart/form-data");
             expect(body.get("foo")).toBe("boop");
             expect(body.get("bar")).toBe("baz");
-            server.stop(true);
           });
         });
       }
@@ -598,5 +598,51 @@ describe("FormData", () => {
       expect(formData instanceof FormData).toBe(true);
       expect(formData.getAll("foo")).toEqual(["bar", "baz"]);
     });
+
+    it("should handle slices", async () => {
+      using server = Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const body = await req.formData();
+          return new Response(body.get("file"), {
+            headers: { "Content-Type": "text/plain" },
+          });
+        },
+      });
+      const fileSlice = Bun.file(join(import.meta.dir, "..", "fetch", "fixture.html")).slice(5, 10);
+      const form = new FormData();
+      form.append("file", fileSlice);
+      const result = await fetch(server.url, {
+        method: "POST",
+        body: form,
+      }).then(res => res.blob());
+      expect(result.size).toBe(5);
+      expect(fileSlice.size).toBe(result.size);
+    });
+  });
+
+  // The minimum repro for this was to not call the .name and .type getter on the Blob
+  // But the crux of the issue is that we called dupe() on the Blob, without also incrementing the reference count of the name string.
+  // https://github.com/oven-sh/bun/issues/14918
+  it("should increment reference count of the name string on Blob", async () => {
+    const buffer = new File([Buffer.from(Buffer.alloc(48 * 1024, "abcdefh").toString("base64"), "base64")], "ok.jpg");
+    function test() {
+      let file = new File([buffer], "ok.jpg");
+      file.name;
+      file.type;
+
+      let formData = new FormData();
+      formData.append("foo", file);
+      formData.get("foo");
+      formData.get("foo")!.name;
+      formData.get("foo")!.type;
+      return formData;
+    }
+    for (let i = 0; i < 100000; i++) {
+      test();
+      if (i % 5000 === 0) {
+        Bun.gc();
+      }
+    }
   });
 });

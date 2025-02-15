@@ -205,7 +205,7 @@ export fn init(heapsize: u32) void {
         buffer_writer = writer.ctx;
     }
 }
-const Arena = @import("./mimalloc_arena.zig").Arena;
+const Arena = @import("./allocators/mimalloc_arena.zig").Arena;
 
 var log: Logger.Log = undefined;
 
@@ -453,7 +453,7 @@ export fn getTests(opts_array: u64) u64 {
     defer arena.deinit();
     var log_ = Logger.Log.init(allocator);
     var reader = ApiReader.init(Uint8Array.fromJS(opts_array), allocator);
-    var opts = Api.GetTestsRequest.decode(&reader) catch @panic("out of memory");
+    var opts = Api.GetTestsRequest.decode(&reader) catch bun.outOfMemory();
     var code = Logger.Source.initPathString(if (opts.path.len > 0) opts.path else "my-test-file.test.tsx", opts.contents);
     code.contents_is_recycled = true;
     defer {
@@ -464,7 +464,7 @@ export fn getTests(opts_array: u64) u64 {
     var parser = JSParser.Parser.init(.{
         .jsx = .{},
         .ts = true,
-    }, &log_, &code, define, allocator) catch @panic("out of memory");
+    }, &log_, &code, define, allocator) catch bun.outOfMemory();
 
     var anaylzer = TestAnalyzer{
         .items = std.ArrayList(
@@ -483,7 +483,7 @@ export fn getTests(opts_array: u64) u64 {
 
         Output.print("Error: {s}\n", .{@errorName(err)});
 
-        log_.printForLogLevel(Output.writer()) catch unreachable;
+        log_.print(Output.writer()) catch unreachable;
         return 0;
     };
 

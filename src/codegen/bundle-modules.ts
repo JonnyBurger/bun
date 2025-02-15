@@ -7,17 +7,19 @@
 // supported macros that aren't json value -> json value. Otherwise, I'd use a real JS parser/ast
 // library, instead of RegExp hacks.
 //
-// For explanation on this, please nag @paperdave to write documentation on how everything works.
+// For explanation on this, please nag @paperclover to write documentation on how everything works.
 import fs from "fs";
-import { writeFile, mkdir } from "fs/promises";
-import path from "path";
-import { sliceSourceCode } from "./builtin-parser";
-import { cap, declareASCIILiteral, writeIfNotChanged } from "./helpers";
-import { createAssertClientJS, createLogClientJS } from "./client-js";
+import { mkdir, writeFile } from "fs/promises";
 import { builtinModules } from "node:module";
-import { define } from "./replacements";
+import path from "path";
+import ErrorCode from "../bun.js/bindings/ErrorCode";
+import { sliceSourceCode } from "./builtin-parser";
+import { createAssertClientJS, createLogClientJS } from "./client-js";
+import { getJS2NativeCPP, getJS2NativeZig } from "./generate-js2native";
+import { cap, declareASCIILiteral, writeIfNotChanged } from "./helpers";
 import { createInternalModuleRegistry } from "./internal-module-registry-scanner";
-import { getJS2NativeCPP, getJS2NativeZig } from "./js2native-generator";
+import { define } from "./replacements";
+import jsclasses from "./../bun.js/bindings/js_classes";
 
 const BASE = path.join(import.meta.dir, "../js");
 const debug = process.argv[2] === "--debug=ON";
@@ -41,11 +43,14 @@ const JS_DIR = path.join(CMAKE_BUILD_ROOT, "js");
 const t = new Bun.Transpiler({ loader: "tsx" });
 
 let start = performance.now();
-function mark(log: string) {
+const silent = process.env.BUN_SILENT === "1";
+function markVerbose(log: string) {
   const now = performance.now();
   console.log(`${log} (${(now - start).toFixed(0)}ms)`);
   start = now;
 }
+
+const mark = silent ? (log: string) => {} : markVerbose;
 
 const { moduleList, nativeModuleIds, nativeModuleEnumToId, nativeModuleEnums, requireTransformer } =
   createInternalModuleRegistry(BASE);
@@ -77,6 +82,16 @@ for (let i = 0; i < moduleList.length; i++) {
   try {
     let input = fs.readFileSync(path.join(BASE, moduleList[i]), "utf8");
 
+    // NOTE: internal modules are parsed as functions. They must use ESM to export and require to import.
+    // TODO: Bother @paperdave and have him check for module.exports, and create/return a module object if detected.
+    if (!/\bexport\s+(?:function|class|const|default|{)/.test(input)) {
+      if (input.includes("module.exports")) {
+        throw new Error("Cannot use CommonJS module.exports in ESM modules. Use `export default { ... }` instead.");
+      } else {
+        throw new Error("Internal modules must have an `export default` statement.");
+      }
+    }
+
     const scannedImports = t.scanImports(input);
     for (const imp of scannedImports) {
       if (imp.kind === "import-statement") {
@@ -107,13 +122,12 @@ for (let i = 0; i < moduleList.length; i++) {
       true,
       x => requireTransformer(x, moduleList[i]),
     );
-    let fileToTranspile = `// @ts-nocheck
-// GENERATED TEMP FILE - DO NOT EDIT
+    let fileToTranspile = `// GENERATED TEMP FILE - DO NOT EDIT
 // Sourced from src/js/${moduleList[i]}
 ${importStatements.join("\n")}
 
 ${processed.result.slice(1).trim()}
-$$EXPORT$$(__intrinsic__exports).$$EXPORT_END$$;
+;$$EXPORT$$(__intrinsic__exports).$$EXPORT_END$$;
 `;
 
     // Attempt to optimize "$exports = ..." to a variableless return
@@ -135,7 +149,8 @@ $$EXPORT$$(__intrinsic__exports).$$EXPORT_END$$;
     if (!fs.existsSync(path.dirname(outputPath))) {
       verbose("directory did not exist after mkdir twice:", path.dirname(outputPath));
     }
-    // await Bun.sleep(10);
+
+    fileToTranspile = "// @ts-nocheck\n" + fileToTranspile;
 
     try {
       await writeFile(outputPath, fileToTranspile);
@@ -373,7 +388,11 @@ pub const ResolvedSourceTag = enum(u32) {
     file = 4,
     esm = 5,
     json_for_object_loader = 6,
+    /// Generate an object with "default" set to all the exports, including a "default" propert
     exports_object = 7,
+
+    /// Generate a module that only exports default the input JSValue
+    export_default_object = 8,
 
     // Built in modules are loaded through InternalModuleRegistry by numerical ID.
     // In this enum are represented as \`(1 << 9) & id\`
@@ -398,12 +417,12 @@ writeIfNotChanged(
     ESM = 5,
     JSONForObjectLoader = 6,
     ExportsObject = 7,
-
+    ExportDefaultObject = 8,
     // Built in modules are loaded through InternalModuleRegistry by numerical ID.
     // In this enum are represented as \`(1 << 9) & id\`
     InternalModuleRegistryFlag = 1 << 9,
 ${moduleList.map((id, n) => `    ${idToEnumName(id)} = ${(1 << 9) | n},`).join("\n")}
-    
+
     // Native modules run through the same system, but with different underlying initializers.
     // They also have bit 10 set to differentiate them from JS builtins.
     NativeModuleFlag = (1 << 10) | (1 << 9),
@@ -429,21 +448,66 @@ writeIfNotChanged(path.join(CODEGEN_DIR, "GeneratedJS2Native.h"), getJS2NativeCP
 const js2nativeZigPath = path.join(import.meta.dir, "../bun.js/bindings/GeneratedJS2Native.zig");
 writeIfNotChanged(js2nativeZigPath, getJS2NativeZig(js2nativeZigPath));
 
+const generatedDTSPath = path.join(CODEGEN_DIR, "generated.d.ts");
+writeIfNotChanged(
+  generatedDTSPath,
+  (() => {
+    let dts = `
+// GENERATED TEMP FILE - DO NOT EDIT
+// generated by ${import.meta.path}
+`;
+
+    for (let i = 0; i < ErrorCode.length; i++) {
+      const [code, constructor, name, ...other_constructors] = ErrorCode[i];
+      dts += `
+/**
+ * Generate a ${name ?? constructor.name} error with the \`code\` property set to ${code}.
+ *
+ * @param msg The error message
+ * @param args Additional arguments
+ */
+declare function $${code}(msg: string, ...args: any[]): ${name};
+`;
+
+      for (const con of other_constructors) {
+        if (con == null) continue;
+        dts += `
+/**
+ * Generate a ${con.name} error with the \`code\` property set to ${code}.
+ *
+ * @param msg The error message
+ * @param args Additional arguments
+ */
+declare function $${code}_${con.name}(msg: string, ...args: any[]): ${name};
+`;
+      }
+    }
+
+    for (const [name] of jsclasses) {
+      dts += `\ndeclare function $inherits${name}(value: any): boolean;`;
+    }
+
+    return dts;
+  })(),
+);
+
 mark("Generate Code");
 
-console.log("");
-console.timeEnd(timeString);
-console.log(
-  `  %s kb`,
-  Math.floor(
-    (moduleList.reduce((a, b) => a + outputs.get(b.slice(0, -3).replaceAll("/", path.sep)).length, 0) +
-      globalThis.internalFunctionJSSize) /
-      1000,
-  ),
-);
-console.log(`  %s internal modules`, moduleList.length);
-console.log(
-  `  %s internal functions across %s files`,
-  globalThis.internalFunctionCount,
-  globalThis.internalFunctionFileCount,
-);
+if (!silent) {
+  console.log("");
+  console.timeEnd(timeString);
+  console.log(
+    `  %s kb`,
+    Math.floor(
+      (moduleList.reduce((a, b) => a + outputs.get(b.slice(0, -3).replaceAll("/", path.sep)).length, 0) +
+        globalThis.internalFunctionJSSize) /
+        1000,
+    ),
+  );
+  console.log(`  %s internal modules`, moduleList.length);
+  console.log(
+    `  %s internal functions across %s files`,
+    globalThis.internalFunctionCount,
+    globalThis.internalFunctionFileCount,
+  );
+}

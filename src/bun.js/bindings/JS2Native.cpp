@@ -1,3 +1,4 @@
+#include "root.h"
 #include "JS2Native.h"
 
 #include <JavaScriptCore/BuiltinUtils.h>
@@ -5,6 +6,7 @@
 #include <JavaScriptCore/JSGlobalObject.h>
 
 #include "ZigGlobalObject.h"
+
 #include "GeneratedJS2Native.h"
 #include "wtf/Assertions.h"
 
@@ -30,7 +32,7 @@ JSC_DEFINE_HOST_FUNCTION(jsDollarLazy, (JSC::JSGlobalObject * lexicalGlobalObjec
         "In call to $lazy, got invalid id '%d'. This is a bug in Bun's JS2Native code generator.",
         id);
     Zig::GlobalObject* ptr = jsCast<Zig::GlobalObject*>(lexicalGlobalObject);
-    return JSValue::encode(JS2NativeGenerated::js2nativePointers[id](ptr));
+    return JSValue::encode(JS2NativeGenerated::callJS2Native(id, ptr));
 }
 
 } // namespace JS2Native

@@ -12,14 +12,14 @@ const Output = bun.Output;
 const CompileTarget = @This();
 
 os: Environment.OperatingSystem = Environment.os,
-arch: Environment.Archictecture = Environment.arch,
+arch: Environment.Architecture = Environment.arch,
 baseline: bool = !Environment.enableSIMD,
 version: bun.Semver.Version = .{
     .major = @truncate(Environment.version.major),
     .minor = @truncate(Environment.version.minor),
     .patch = @truncate(Environment.version.patch),
 },
-libc: Libc = .default,
+libc: Libc = if (!Environment.isMusl) .default else .musl,
 
 const Libc = enum {
     /// The default libc for the target
@@ -27,6 +27,14 @@ const Libc = enum {
     default,
     /// musl libc
     musl,
+
+    /// npm package name, `@oven-sh/bun-{os}-{arch}`
+    pub fn npmName(this: Libc) []const u8 {
+        return switch (this) {
+            .default => "",
+            .musl => "-musl",
+        };
+    }
 
     pub fn format(self: @This(), comptime _: []const u8, _: anytype, writer: anytype) !void {
         if (self == .musl) {
@@ -64,21 +72,25 @@ pub fn toNPMRegistryURL(this: *const CompileTarget, buf: []u8) ![]const u8 {
 pub fn toNPMRegistryURLWithURL(this: *const CompileTarget, buf: []u8, registry_url: []const u8) ![]const u8 {
     return switch (this.os) {
         inline else => |os| switch (this.arch) {
-            inline else => |arch| switch (this.baseline) {
-                // https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-0.1.6.tgz
-                inline else => |is_baseline| try std.fmt.bufPrint(buf, comptime "{s}/@oven/bun-" ++
-                    os.npmName() ++ "-" ++ arch.npmName() ++
-                    (if (is_baseline) "-baseline" else "") ++
-                    "/-/bun-" ++
-                    os.npmName() ++ "-" ++ arch.npmName() ++
-                    (if (is_baseline) "-baseline" else "") ++
-                    "-" ++
-                    "{d}.{d}.{d}.tgz", .{
-                    registry_url,
-                    this.version.major,
-                    this.version.minor,
-                    this.version.patch,
-                }),
+            inline else => |arch| switch (this.libc) {
+                inline else => |libc| switch (this.baseline) {
+                    // https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-0.1.6.tgz
+                    inline else => |is_baseline| try std.fmt.bufPrint(buf, comptime "{s}/@oven/bun-" ++
+                        os.npmName() ++ "-" ++ arch.npmName() ++
+                        libc.npmName() ++
+                        (if (is_baseline) "-baseline" else "") ++
+                        "/-/bun-" ++
+                        os.npmName() ++ "-" ++ arch.npmName() ++
+                        libc.npmName() ++
+                        (if (is_baseline) "-baseline" else "") ++
+                        "-" ++
+                        "{d}.{d}.{d}.tgz", .{
+                        registry_url,
+                        this.version.major,
+                        this.version.minor,
+                        this.version.patch,
+                    }),
+                },
             },
         },
     };
@@ -120,7 +132,7 @@ pub fn exePath(this: *const CompileTarget, buf: *bun.PathBuffer, version_str: [:
         bun.fs.FileSystem.instance.top_level_dir,
         buf,
         &.{
-            bun.install.PackageManager.fetchCacheDirectoryPath(env).path,
+            bun.install.PackageManager.fetchCacheDirectoryPath(env, null).path,
             version_str,
         },
         .auto,
@@ -137,8 +149,8 @@ const HTTP = bun.http;
 const MutableString = bun.MutableString;
 const Global = bun.Global;
 pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, allocator: std.mem.Allocator, dest_z: [:0]const u8) !void {
-    try HTTP.HTTPThread.init();
-    var refresher = std.Progress{};
+    HTTP.HTTPThread.init(&.{});
+    var refresher = bun.Progress{};
 
     {
         refresher.refresh();
@@ -153,8 +165,7 @@ pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, alloc
         {
             var progress = refresher.start("Downloading", 0);
             defer progress.end();
-            const timeout = 30000;
-            const http_proxy: ?bun.URL = env.getHttpProxy(url);
+            const http_proxy: ?bun.URL = env.getHttpProxyFor(url);
 
             async_http.* = HTTP.AsyncHTTP.initSync(
                 allocator,
@@ -164,16 +175,14 @@ pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, alloc
                 "",
                 compressed_archive_bytes,
                 "",
-                timeout,
                 http_proxy,
                 null,
                 HTTP.FetchRedirect.follow,
             );
-            async_http.client.timeout = timeout;
             async_http.client.progress_node = progress;
-            async_http.client.reject_unauthorized = env.getTLSRejectUnauthorized();
+            async_http.client.flags.reject_unauthorized = env.getTLSRejectUnauthorized();
 
-            const response = try async_http.sendSync(true);
+            const response = try async_http.sendSync();
 
             switch (response.status_code) {
                 404 => {
@@ -257,22 +266,22 @@ pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, alloc
                 var node = refresher.start("Extracting", 0);
                 defer node.end();
 
-                const libarchive = @import("./libarchive//libarchive.zig");
+                const libarchive = bun.libarchive;
                 var tmpname_buf: [1024]u8 = undefined;
                 const tempdir_name = bun.span(try bun.fs.FileSystem.instance.tmpname("tmp", &tmpname_buf, bun.fastRandom()));
                 var tmpdir = try std.fs.cwd().makeOpenPath(tempdir_name, .{});
                 defer tmpdir.close();
                 defer std.fs.cwd().deleteTree(tempdir_name) catch {};
-                _ = libarchive.Archive.extractToDir(
+                _ = libarchive.Archiver.extractToDir(
                     tarball_bytes.items,
                     tmpdir,
                     null,
                     void,
                     {},
-                    // "package/bin"
-                    2,
-                    true,
-                    false,
+                    .{
+                        // "package/bin"
+                        .depth_to_skip = 2,
+                    },
                 ) catch |err| {
                     node.end();
                     Output.err(err,
@@ -294,8 +303,10 @@ pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, alloc
                             const dirname = bun.path.dirname(dest_z, .loose);
                             if (dirname.len > 0) {
                                 std.fs.cwd().makePath(dirname) catch {};
+                                continue;
                             }
-                            continue;
+
+                            // fallthrough, failed for another reason
                         }
                         node.end();
                         Output.err(err, "Failed to move cross-compiled bun binary into cache directory {}", .{bun.fmt.fmtPath(u8, dest_z, .{})});
@@ -312,8 +323,10 @@ pub fn downloadToPath(this: *const CompileTarget, env: *bun.DotEnv.Loader, alloc
 pub fn isSupported(this: *const CompileTarget) bool {
     return switch (this.os) {
         .windows => this.arch == .x64,
+
         .mac => true,
-        .linux => this.libc == .default,
+        .linux => true,
+
         .wasm => false,
     };
 }
@@ -340,7 +353,7 @@ pub fn from(input_: []const u8) CompileTarget {
         const token = splitter.next() orelse break;
         if (token.len == 0) continue;
 
-        if (Environment.Archictecture.names.get(token)) |arch| {
+        if (Environment.Architecture.names.get(token)) |arch| {
             this.arch = arch;
             found_arch = true;
             continue;
@@ -430,6 +443,8 @@ pub fn defineValues(this: *const CompileTarget) []const []const u8 {
                         .arm64 => "\"arm64\"",
                         else => @compileError("TODO"),
                     },
+
+                    "\"" ++ Global.package_json_version ++ "\"",
                 };
             }.values,
             else => @panic("TODO"),

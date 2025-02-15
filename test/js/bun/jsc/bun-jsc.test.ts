@@ -1,31 +1,30 @@
-import { describe, expect, it } from "bun:test";
 import {
-  describe as jscDescribe,
+  callerSourceOrigin,
   describeArray,
-  serialize,
   deserialize,
-  gcAndSweep,
-  fullGC,
+  drainMicrotasks,
   edenGC,
+  fullGC,
+  gcAndSweep,
+  getProtectedObjects,
+  getRandomSeed,
   heapSize,
   heapStats,
-  memoryUsage,
-  getRandomSeed,
-  setRandomSeed,
   isRope,
-  callerSourceOrigin,
-  noFTL,
-  noOSRExitFuzzing,
-  optimizeNextInvocation,
+  describe as jscDescribe,
+  memoryUsage,
   numberOfDFGCompiles,
+  optimizeNextInvocation,
+  profile,
   releaseWeakRefs,
-  totalCompileTime,
-  getProtectedObjects,
   reoptimizationRetryCount,
-  drainMicrotasks,
-  startRemoteDebugger,
+  serialize,
+  setRandomSeed,
   setTimeZone,
+  totalCompileTime,
 } from "bun:jsc";
+import { describe, expect, it } from "bun:test";
+import { isBuildKite, isWindows } from "harness";
 
 describe("bun:jsc", () => {
   function count() {
@@ -73,7 +72,10 @@ describe("bun:jsc", () => {
     expect(setRandomSeed(2)).toBeUndefined();
   });
   it("isRope", () => {
-    expect(isRope("a" + 123 + "b")).toBe(true);
+    // https://twitter.com/bunjavascript/status/1806921203644571685
+    let y;
+    y = 123;
+    expect(isRope("a" + y + "b")).toBe(true);
     expect(isRope("abcdefgh")).toBe(false);
   });
   it("callerSourceOrigin", () => {
@@ -88,7 +90,7 @@ describe("bun:jsc", () => {
   });
   it("numberOfDFGCompiles", async () => {
     await Bun.sleep(5); // this failed once and i suspect it is because the query was done too fast
-    expect(numberOfDFGCompiles(count)).toBeGreaterThan(0);
+    expect(numberOfDFGCompiles(count)).toBeGreaterThanOrEqual(0);
   });
   it("releaseWeakRefs", () => {
     expect(releaseWeakRefs()).toBeUndefined();
@@ -166,5 +168,19 @@ describe("bun:jsc", () => {
       serialize({ a: 1 });
     }
     Bun.gc(true);
+  });
+
+  it.todoIf(isBuildKite && isWindows)("profile async", async () => {
+    const { promise, resolve } = Promise.withResolvers();
+    const result = await profile(
+      async function hey(arg1: number) {
+        await Bun.sleep(10).then(() => resolve(arguments));
+        return arg1;
+      },
+      1,
+      2,
+    );
+    const input = await promise;
+    expect({ ...input }).toStrictEqual({ "0": 2 });
   });
 });

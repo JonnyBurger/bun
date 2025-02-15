@@ -76,7 +76,8 @@ pub fn ComptimeStringMapWithKeyType(comptime KeyType: type, comptime V: type, co
             for (kvs, 0..) |kv, i| {
                 k[i] = kv.key;
             }
-            break :blk k[0..];
+            const final = k;
+            break :blk &final;
         };
 
         pub const Value = V;
@@ -172,7 +173,8 @@ pub fn ComptimeStringMapWithKeyType(comptime KeyType: type, comptime V: type, co
                 }
             }
 
-            const str = bun.String.tryFromJS(input, globalThis) orelse return null;
+            const str = bun.String.fromJS(input, globalThis);
+            bun.assert(str.tag != .Dead);
             defer str.deref();
             return getWithEql(str, bun.String.eqlComptime);
         }
@@ -185,9 +187,42 @@ pub fn ComptimeStringMapWithKeyType(comptime KeyType: type, comptime V: type, co
                 }
             }
 
-            const str = bun.String.tryFromJS(input, globalThis) orelse return null;
+            const str = bun.String.fromJS(input, globalThis);
+            bun.assert(str.tag != .Dead);
             defer str.deref();
             return str.inMapCaseInsensitive(@This());
+        }
+
+        pub fn fromString(str: bun.String) ?V {
+            return getWithEql(str, bun.String.eqlComptime);
+        }
+
+        pub fn getASCIIICaseInsensitive(input: anytype) ?V {
+            return getWithEqlLowercase(input, bun.strings.eqlComptimeIgnoreLen);
+        }
+
+        pub fn getWithEqlLowercase(input: anytype, comptime eql: anytype) ?V {
+            const Input = @TypeOf(input);
+            const length = if (@hasField(Input, "len")) input.len else input.length();
+            if (length < precomputed.min_len or length > precomputed.max_len)
+                return null;
+
+            comptime var i: usize = precomputed.min_len;
+            inline while (i <= precomputed.max_len) : (i += 1) {
+                if (length == i) {
+                    const lowerbuf: [i]u8 = brk: {
+                        var buf: [i]u8 = undefined;
+                        for (input, &buf) |c, *j| {
+                            j.* = std.ascii.toLower(c);
+                        }
+                        break :brk buf;
+                    };
+
+                    return getWithLengthAndEql(&lowerbuf, i, eql);
+                }
+            }
+
+            return null;
         }
 
         pub fn getWithEql(input: anytype, comptime eql: anytype) ?V {
@@ -200,6 +235,36 @@ pub fn ComptimeStringMapWithKeyType(comptime KeyType: type, comptime V: type, co
             inline while (i <= precomputed.max_len) : (i += 1) {
                 if (length == i) {
                     return getWithLengthAndEql(input, i, eql);
+                }
+            }
+
+            return null;
+        }
+
+        pub fn getAnyCase(input: anytype) ?V {
+            return getCaseInsensitiveWithEql(input, bun.strings.eqlComptimeIgnoreLen);
+        }
+
+        pub fn getCaseInsensitiveWithEql(input: anytype, comptime eql: anytype) ?V {
+            const Input = @TypeOf(input);
+            const length = if (@hasField(Input, "len")) input.len else input.length();
+            if (length < precomputed.min_len or length > precomputed.max_len)
+                return null;
+
+            comptime var i: usize = precomputed.min_len;
+            inline while (i <= precomputed.max_len) : (i += 1) {
+                if (length == i) {
+                    const lowercased: [i]u8 = brk: {
+                        var buf: [i]u8 = undefined;
+                        for (input[0..i], &buf) |c, *b| {
+                            b.* = switch (c) {
+                                'A'...'Z' => c + 32,
+                                else => c,
+                            };
+                        }
+                        break :brk buf;
+                    };
+                    return getWithLengthAndEql(&lowercased, i, eql);
                 }
             }
 
@@ -461,44 +526,3 @@ const TestEnum2 = enum {
         .{ "00", .FL },
     });
 };
-
-pub fn compareString(input: []const u8) !void {
-    const str = try std.heap.page_allocator.dupe(u8, input);
-    if (TestEnum2.map.has(str) != TestEnum2.official.has(str)) {
-        std.debug.panic("{s} - TestEnum2.map.has(str) ({d}) != TestEnum2.official.has(str) ({d})", .{
-            str,
-            @intFromBool(TestEnum2.map.has(str)),
-            @intFromBool(TestEnum2.official.has(str)),
-        });
-    }
-
-    std.debug.print("For string: \"{s}\" (has a match? {d})\n", .{ str, @intFromBool(TestEnum2.map.has(str)) });
-
-    var is_eql = false;
-    var timer = try std.time.Timer.start();
-
-    for (0..99999999) |_| {
-        is_eql = @call(.never_inline, TestEnum2.map.has, .{str});
-    }
-    const new = timer.lap();
-
-    std.debug.print("- new {}\n", .{std.fmt.fmtDuration(new)});
-
-    for (0..99999999) |_| {
-        is_eql = @call(.never_inline, TestEnum2.official.has, .{str});
-    }
-
-    const _std = timer.lap();
-
-    std.debug.print("- std {}\n\n", .{std.fmt.fmtDuration(_std)});
-}
-
-pub fn main() anyerror!void {
-    try compareString("naaaaaa");
-    try compareString("nothinz");
-    try compareString("these");
-    try compareString("incommon");
-    try compareString("noMatch");
-    try compareString("0");
-    try compareString("00");
-}

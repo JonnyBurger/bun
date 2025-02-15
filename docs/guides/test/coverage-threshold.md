@@ -52,9 +52,9 @@ Different thresholds can be set for line-level and function-level coverage.
 ```toml
 [test]
 # to set different thresholds for lines and functions
-coverageThreshold = { line = 0.5, function = 0.7 }
+coverageThreshold = { lines = 0.5, functions = 0.7 }
 ```
 
 ---
 
-See [Docs > Test runner > Coverage](/docs/test/coverage) for complete documentation on code coverage reporting in Bun.
+See [Docs > Test runner > Coverage](https://bun.sh/docs/test/coverage) for complete documentation on code coverage reporting in Bun.

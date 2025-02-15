@@ -82,7 +82,7 @@ pub fn fromEntries(
 pub fn fromMapLike(
     comptime Map: type,
     allocator: std.mem.Allocator,
-    entries: anytype,
+    entries: []const struct { @FieldType(Map.KV, "key"), @FieldType(Map.KV, "value") },
 ) !Map {
     var map: Map = undefined;
     if (comptime @hasField(Map, "allocator")) {
@@ -91,11 +91,10 @@ pub fn fromMapLike(
         map = Map{};
     }
 
-    try map.ensureUnusedCapacity(entries.count());
+    try map.ensureUnusedCapacity(allocator, entries.len);
 
-    var iter = entries.iterator();
-    while (iter.next()) |entry| {
-        map.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
+    for (entries) |entry| {
+        map.putAssumeCapacityNoClobber(entry[0], entry[1]);
     }
 
     return map;
@@ -156,11 +155,11 @@ pub inline fn from(
         return fromEntries(Array, allocator, DefaultType, default);
     }
 
-    if (comptime @typeInfo(DefaultType) == .Struct) {
+    if (comptime @typeInfo(DefaultType) == .@"struct") {
         return fromSlice(Array, allocator, DefaultType, default);
     }
 
-    if (comptime @typeInfo(DefaultType) == .Array) {
+    if (comptime @typeInfo(DefaultType) == .array) {
         return fromSlice(Array, allocator, []const Of(Array), @as([]const Of(Array), &default));
     }
 
@@ -256,22 +255,22 @@ pub fn Batcher(comptime Type: type) type {
             return @This(){ .head = all };
         }
 
-        pub inline fn done(this: *@This()) void {
-            bun.assert(this.head.len == 0);
+        pub fn done(this: *@This()) void {
+            bun.assert(this.head.len == 0); // count to init() was too large, overallocation
         }
 
-        pub inline fn eat(this: *@This(), value: Type) *Type {
+        pub fn eat(this: *@This(), value: Type) *Type {
             return @as(*Type, @ptrCast(&this.head.eat1(value).ptr));
         }
 
-        pub inline fn eat1(this: *@This(), value: Type) []Type {
+        pub fn eat1(this: *@This(), value: Type) []Type {
             var prev = this.head[0..1];
             prev[0] = value;
             this.head = this.head[1..];
             return prev;
         }
 
-        pub inline fn next(this: *@This(), values: anytype) []Type {
+        pub fn next(this: *@This(), values: anytype) []Type {
             this.head[0..values.len].* = values;
             const prev = this.head[0..values.len];
             this.head = this.head[values.len..];

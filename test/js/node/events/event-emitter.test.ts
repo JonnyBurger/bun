@@ -1,10 +1,10 @@
-import { test, describe, expect } from "bun:test";
 import { sleep } from "bun";
+import { describe, expect, mock, test } from "bun:test";
 import { createRequire } from "module";
 
 // this is also testing that imports with default and named imports in the same statement work
 // our transpiler transform changes this to a var with import.meta.require
-import EventEmitter, { getEventListeners, captureRejectionSymbol } from "node:events";
+import EventEmitter, { captureRejectionSymbol, getEventListeners, getMaxListeners, setMaxListeners } from "node:events";
 
 describe("node:events", () => {
   test("captureRejectionSymbol", () => {
@@ -70,6 +70,9 @@ describe("node:events", () => {
 describe("EventEmitter", () => {
   test("getEventListeners", () => {
     expect(getEventListeners(new EventEmitter(), "hey").length).toBe(0);
+    const emitter = new EventEmitter();
+    emitter.on("hey", () => {});
+    expect(getEventListeners(emitter, "hey").length).toBe(1);
   });
 
   test("constructor", () => {
@@ -817,4 +820,65 @@ describe("EventEmitter constructors", () => {
     const EventEmitter = require("events");
     new EventEmitter();
   });
+});
+
+test("addAbortListener", async () => {
+  const emitter = new EventEmitter();
+  const controller = new AbortController();
+  const promise = EventEmitter.once(emitter, "hey", { signal: controller.signal });
+  const mocked = mock();
+  EventEmitter.addAbortListener(controller.signal, mocked);
+  controller.abort();
+  expect(promise).rejects.toThrow("aborted");
+  expect(mocked).toHaveBeenCalled();
+});
+
+test("using addAbortListener", async () => {
+  const emitter = new EventEmitter();
+  const controller = new AbortController();
+  const promise = EventEmitter.once(emitter, "hey", { signal: controller.signal });
+  const mocked = mock();
+  {
+    using aborty = EventEmitter.addAbortListener(controller.signal, mocked);
+  }
+  controller.abort();
+  expect(promise).rejects.toThrow("aborted");
+  expect(mocked).not.toHaveBeenCalled();
+});
+
+test("getMaxListeners", () => {
+  const emitter = new EventEmitter();
+  expect(emitter.getMaxListeners()).toBe(10);
+  emitter.setMaxListeners(20);
+  expect(emitter.getMaxListeners()).toBe(20);
+});
+
+test("setMaxListeners", () => {
+  const emitter = new EventEmitter();
+  expect(emitter.getMaxListeners()).toBe(10);
+  emitter.setMaxListeners(20);
+  expect(emitter.getMaxListeners()).toBe(20);
+
+  setMaxListeners(30, emitter);
+  expect(emitter.getMaxListeners()).toBe(30);
+
+  const eventTarget = new EventTarget();
+  setMaxListeners(1, eventTarget);
+  expect(getMaxListeners(eventTarget)).toBe(1);
+
+  setMaxListeners(99, eventTarget);
+  expect(getMaxListeners(eventTarget)).toBe(99);
+});
+
+test("getEventListeners", () => {
+  const target = new EventTarget();
+  expect(getEventListeners(target, "hey").length).toBe(0);
+  target.addEventListener("hey", () => {}, { once: true });
+  expect(getEventListeners(target, "hey").length).toBe(1);
+  target.dispatchEvent(new Event("hey"));
+  expect(getEventListeners(target, "hey").length).toBe(0);
+});
+
+test("EventEmitter.name", () => {
+  expect(EventEmitter.name).toBe("EventEmitter");
 });

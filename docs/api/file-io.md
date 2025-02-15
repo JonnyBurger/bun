@@ -1,8 +1,8 @@
 {% callout %}
 
-<!-- **Note** — The `Bun.file` and `Bun.write` APIs documented on this page are heavily optimized and represent the recommended way to perform file-system tasks using Bun. Existing Node.js projects may use Bun's [nearly complete](/docs/runtime/nodejs-apis#node-fs) implementation of the [`node:fs`](https://nodejs.org/api/fs.html) module. -->
+<!-- **Note** — The `Bun.file` and `Bun.write` APIs documented on this page are heavily optimized and represent the recommended way to perform file-system tasks using Bun. Existing Node.js projects may use Bun's [nearly complete](https://bun.sh/docs/runtime/nodejs-apis#node-fs) implementation of the [`node:fs`](https://nodejs.org/api/fs.html) module. -->
 
-**Note** — The `Bun.file` and `Bun.write` APIs documented on this page are heavily optimized and represent the recommended way to perform file-system tasks using Bun. For operations that are not yet available with `Bun.file`, such as `mkdir` or `readdir`, you can use Bun's [nearly complete](/docs/runtime/nodejs-apis#node-fs) implementation of the [`node:fs`](https://nodejs.org/api/fs.html) module.
+**Note** — The `Bun.file` and `Bun.write` APIs documented on this page are heavily optimized and represent the recommended way to perform file-system tasks using Bun. For operations that are not yet available with `Bun.file`, such as `mkdir` or `readdir`, you can use Bun's [nearly complete](https://bun.sh/docs/runtime/nodejs-apis#node-fs) implementation of the [`node:fs`](https://nodejs.org/api/fs.html) module.
 
 {% /callout %}
 
@@ -28,6 +28,7 @@ const foo = Bun.file("foo.txt");
 await foo.text(); // contents as a string
 await foo.stream(); // contents as ReadableStream
 await foo.arrayBuffer(); // contents as ArrayBuffer
+await foo.bytes(); // contents as Uint8Array
 ```
 
 File references can also be created using numerical [file descriptors](https://en.wikipedia.org/wiki/File_descriptor) or `file://` URLs.
@@ -59,6 +60,14 @@ For convenience, Bun exposes `stdin`, `stdout` and `stderr` as instances of `Bun
 Bun.stdin; // readonly
 Bun.stdout;
 Bun.stderr;
+```
+
+### Deleting files (`file.delete()`)
+
+You can delete a file by calling the `.delete()` function.
+
+```ts
+await Bun.file("logs.json").delete()
 ```
 
 ## Writing files (`Bun.write()`)

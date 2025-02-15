@@ -1,5 +1,5 @@
 const ExternalStringList = @import("./install.zig").ExternalStringList;
-const Semver = @import("./semver.zig");
+const Semver = bun.Semver;
 const ExternalString = Semver.ExternalString;
 const String = Semver.String;
 const Output = bun.Output;
@@ -7,14 +7,19 @@ const Global = bun.Global;
 const std = @import("std");
 const strings = bun.strings;
 const Environment = @import("../env.zig");
-const Path = @import("../resolver/resolve_path.zig");
 const C = @import("../c.zig");
 const Fs = @import("../fs.zig");
 const stringZ = bun.stringZ;
 const Resolution = @import("./resolution.zig").Resolution;
 const bun = @import("root").bun;
+const path = bun.path;
 const string = bun.string;
-const PackageInstall = @import("./install.zig").PackageInstall;
+const Install = @import("./install.zig");
+const PackageInstall = Install.PackageInstall;
+const Dependency = @import("./dependency.zig");
+const OOM = bun.OOM;
+const JSON = bun.JSON;
+const Lockfile = Install.Lockfile;
 
 /// Normalized `bin` field in [package.json](https://docs.npmjs.com/cli/v8/configuring-npm/package-json#bin)
 /// Can be a:
@@ -47,6 +52,50 @@ pub const Bin = extern struct {
         }
 
         return 0;
+    }
+
+    pub fn eql(
+        l: *const Bin,
+        r: *const Bin,
+        l_buf: string,
+        l_extern_strings: []const ExternalString,
+        r_buf: string,
+        r_extern_strings: []const ExternalString,
+    ) bool {
+        if (l.tag != r.tag) return false;
+
+        return switch (l.tag) {
+            .none => true,
+            .file => l.value.file.eql(r.value.file, l_buf, r_buf),
+            .dir => l.value.dir.eql(r.value.dir, l_buf, r_buf),
+            .named_file => l.value.named_file[0].eql(r.value.named_file[0], l_buf, r_buf) and
+                l.value.named_file[1].eql(r.value.named_file[1], l_buf, r_buf),
+            .map => {
+                const l_list = l.value.map.get(l_extern_strings);
+                const r_list = r.value.map.get(r_extern_strings);
+                if (l_list.len != r_list.len) return false;
+
+                // assuming these maps are small without duplicate keys
+                var i: usize = 0;
+                outer: while (i < l_list.len) : (i += 2) {
+                    var j: usize = 0;
+                    while (j < r_list.len) : (j += 2) {
+                        if (l_list[i].hash == r_list[j].hash) {
+                            if (l_list[i + 1].hash != r_list[j + 1].hash) {
+                                return false;
+                            }
+
+                            continue :outer;
+                        }
+                    }
+
+                    // not found
+                    return false;
+                }
+
+                return true;
+            },
+        };
     }
 
     pub fn clone(this: *const Bin, buf: []const u8, prev_external_strings: []const ExternalString, all_extern_strings: []ExternalString, extern_strings_slice: []ExternalString, comptime StringBuilder: type, builder: StringBuilder) Bin {
@@ -97,8 +146,231 @@ pub const Bin = extern struct {
         unreachable;
     }
 
+    pub fn cloneAppend(this: *const Bin, this_buf: string, this_extern_strings: []const ExternalString, lockfile: *Lockfile) OOM!Bin {
+        var string_buf = lockfile.stringBuf();
+        defer string_buf.apply(lockfile);
+
+        const cloned: Bin = .{
+            .tag = this.tag,
+
+            .value = switch (this.tag) {
+                .none => Value.init(.{ .none = {} }),
+                .file => Value.init(.{
+                    .file = try string_buf.append(this.value.file.slice(this_buf)),
+                }),
+                .named_file => Value.init(.{ .named_file = .{
+                    try string_buf.append(this.value.named_file[0].slice(this_buf)),
+                    try string_buf.append(this.value.named_file[1].slice(this_buf)),
+                } }),
+                .dir => Value.init(.{
+                    .dir = try string_buf.append(this.value.dir.slice(this_buf)),
+                }),
+                .map => map: {
+                    const off = lockfile.buffers.extern_strings.items.len;
+                    for (this.value.map.get(this_extern_strings)) |extern_string| {
+                        try lockfile.buffers.extern_strings.append(
+                            lockfile.allocator,
+                            try string_buf.appendExternal(extern_string.slice(this_buf)),
+                        );
+                    }
+                    const new = lockfile.buffers.extern_strings.items[off..];
+                    break :map Value.init(.{
+                        .map = ExternalStringList.init(lockfile.buffers.extern_strings.items, new),
+                    });
+                },
+            },
+        };
+
+        return cloned;
+    }
+
+    /// Used for packages read from text lockfile.
+    pub fn parseAppend(
+        allocator: std.mem.Allocator,
+        bin_expr: JSON.Expr,
+        buf: *String.Buf,
+        extern_strings: *std.ArrayListUnmanaged(ExternalString),
+    ) OOM!Bin {
+        switch (bin_expr.data) {
+            .e_object => |obj| {
+                switch (obj.properties.len) {
+                    0 => {},
+                    1 => {
+                        const bin_name = obj.properties.ptr[0].key.?.asString(allocator) orelse return .{};
+                        const value = obj.properties.ptr[0].value.?.asString(allocator) orelse return .{};
+
+                        return .{
+                            .tag = .named_file,
+                            .value = .{
+                                .named_file = .{
+                                    try buf.append(bin_name),
+                                    try buf.append(value),
+                                },
+                            },
+                        };
+                    },
+                    else => {
+                        const current_len = extern_strings.items.len;
+                        const num_props: usize = obj.properties.len * 2;
+                        try extern_strings.ensureTotalCapacityPrecise(
+                            allocator,
+                            current_len + num_props,
+                        );
+                        var new = extern_strings.items.ptr[current_len .. current_len + num_props];
+                        extern_strings.items.len += num_props;
+
+                        var i: usize = 0;
+                        for (obj.properties.slice()) |bin_prop| {
+                            const key = bin_prop.key.?;
+                            const value = bin_prop.value.?;
+                            const key_str = key.asString(allocator) orelse return .{};
+                            const value_str = value.asString(allocator) orelse return .{};
+                            new[i] = try buf.appendExternal(key_str);
+                            i += 1;
+                            new[i] = try buf.appendExternal(value_str);
+                            i += 1;
+                        }
+                        if (comptime Environment.allow_assert) {
+                            bun.assert(i == new.len);
+                        }
+                        return .{
+                            .tag = .map,
+                            .value = .{
+                                .map = ExternalStringList.init(extern_strings.items, new),
+                            },
+                        };
+                    },
+                }
+            },
+            .e_string => |str| {
+                if (str.data.len > 0) {
+                    return .{
+                        .tag = .file,
+                        .value = .{
+                            .file = try buf.append(str.data),
+                        },
+                    };
+                }
+            },
+            else => {},
+        }
+        return .{};
+    }
+
+    pub fn parseAppendFromDirectories(allocator: std.mem.Allocator, bin_expr: JSON.Expr, buf: *String.Buf) OOM!Bin {
+        if (bin_expr.asString(allocator)) |bin_str| {
+            return .{
+                .tag = .dir,
+                .value = .{
+                    .dir = try buf.append(bin_str),
+                },
+            };
+        }
+        return .{};
+    }
+
+    pub fn toJson(
+        this: *const Bin,
+        comptime style: enum { single_line, multi_line },
+        indent: if (style == .multi_line) *u32 else void,
+        buf: string,
+        extern_strings: []const ExternalString,
+        writer: anytype,
+        writeIndent: *const fn (anytype, *u32) @TypeOf(writer).Error!void,
+    ) @TypeOf(writer).Error!void {
+        bun.debugAssert(this.tag != .none);
+        if (comptime style == .single_line) {
+            switch (this.tag) {
+                .none => {},
+                .file => {
+                    try writer.print("{}", .{this.value.file.fmtJson(buf, .{})});
+                },
+                .named_file => {
+                    try writer.writeByte('{');
+                    try writer.print(" {}: {} ", .{
+                        this.value.named_file[0].fmtJson(buf, .{}),
+                        this.value.named_file[1].fmtJson(buf, .{}),
+                    });
+                    try writer.writeByte('}');
+                },
+                .dir => {
+                    try writer.print("{}", .{this.value.dir.fmtJson(buf, .{})});
+                },
+                .map => {
+                    try writer.writeByte('{');
+                    const list = this.value.map.get(extern_strings);
+                    var first = true;
+                    var i: usize = 0;
+                    while (i < list.len) : (i += 2) {
+                        if (!first) {
+                            try writer.writeByte(',');
+                        }
+                        first = false;
+                        try writer.print(" {}: {}", .{
+                            list[i].value.fmtJson(buf, .{}),
+                            list[i + 1].value.fmtJson(buf, .{}),
+                        });
+                    }
+                    try writer.writeAll(" }");
+                },
+            }
+
+            return;
+        }
+
+        switch (this.tag) {
+            .none => {},
+            .file => {
+                try writer.print("{}", .{this.value.file.fmtJson(buf, .{})});
+            },
+            .named_file => {
+                try writer.writeAll("{\n");
+                indent.* += 1;
+                try writeIndent(writer, indent);
+                try writer.print("{}: {},\n", .{
+                    this.value.named_file[0].fmtJson(buf, .{}),
+                    this.value.named_file[1].fmtJson(buf, .{}),
+                });
+                indent.* -= 1;
+                try writeIndent(writer, indent);
+                try writer.writeByte('}');
+            },
+            .dir => {
+                try writer.print("{}", .{this.value.dir.fmtJson(buf, .{})});
+            },
+            .map => {
+                try writer.writeByte('{');
+                indent.* += 1;
+
+                const list = this.value.map.get(extern_strings);
+                var any = false;
+                var i: usize = 0;
+                while (i < list.len) : (i += 2) {
+                    if (!any) {
+                        any = true;
+                        try writer.writeByte('\n');
+                    }
+                    try writeIndent(writer, indent);
+                    try writer.print("{}: {},\n", .{
+                        list[i].value.fmtJson(buf, .{}),
+                        list[i + 1].value.fmtJson(buf, .{}),
+                    });
+                }
+                if (!any) {
+                    try writer.writeByte('}');
+                    indent.* -= 1;
+                    return;
+                }
+
+                indent.* -= 1;
+                try writeIndent(writer, indent);
+                try writer.writeByte('}');
+            },
+        }
+    }
+
     pub fn init() Bin {
-        return bun.serializable(.{ .tag = .none, .value = Value.init(.{ .none = {} }) });
+        return bun.serializable(Bin{ .tag = .none, .value = Value.init(.{ .none = {} }) });
     }
 
     pub const Value = extern union {
@@ -184,8 +456,8 @@ pub const Bin = extern struct {
         done: bool = false,
         dir_iterator: ?std.fs.Dir.Iterator = null,
         package_name: String,
-        package_installed_node_modules: std.fs.Dir = bun.invalid_fd.asDir(),
-        buf: [bun.MAX_PATH_BYTES]u8 = undefined,
+        destination_node_modules: std.fs.Dir = bun.invalid_fd.asDir(),
+        buf: bun.PathBuffer = undefined,
         string_buffer: []const u8,
         extern_string_buf: []const ExternalString,
 
@@ -193,14 +465,14 @@ pub const Bin = extern struct {
             if (this.done) return null;
             if (this.dir_iterator == null) {
                 var target = this.bin.value.dir.slice(this.string_buffer);
-                if (strings.hasPrefix(target, "./")) {
+                if (strings.hasPrefixComptime(target, "./") or strings.hasPrefixComptime(target, ".\\")) {
                     target = target[2..];
                 }
                 var parts = [_][]const u8{ this.package_name.slice(this.string_buffer), target };
 
-                const dir = this.package_installed_node_modules;
+                const dir = this.destination_node_modules;
 
-                const joined = Path.joinStringBuf(&this.buf, &parts, .auto);
+                const joined = path.joinStringBuf(&this.buf, &parts, .auto);
                 this.buf[joined.len] = 0;
                 const joined_: [:0]u8 = this.buf[0..joined.len :0];
                 var child_dir = try bun.openDir(dir, joined_);
@@ -227,7 +499,7 @@ pub const Bin = extern struct {
                     this.i += 1;
                     this.done = true;
                     const base = std.fs.path.basename(this.package_name.slice(this.string_buffer));
-                    if (strings.hasPrefix(base, "./"))
+                    if (strings.hasPrefixComptime(base, "./") or strings.hasPrefixComptime(base, ".\\"))
                         return strings.copy(&this.buf, base[2..]);
 
                     return strings.copy(&this.buf, base);
@@ -237,7 +509,7 @@ pub const Bin = extern struct {
                     this.i += 1;
                     this.done = true;
                     const base = std.fs.path.basename(this.bin.value.named_file[0].slice(this.string_buffer));
-                    if (strings.hasPrefix(base, "./"))
+                    if (strings.hasPrefixComptime(base, "./") or strings.hasPrefixComptime(base, ".\\"))
                         return strings.copy(&this.buf, base[2..]);
                     return strings.copy(&this.buf, base);
                 },
@@ -257,7 +529,7 @@ pub const Bin = extern struct {
                             this.string_buffer,
                         ),
                     );
-                    if (strings.hasPrefix(base, "./"))
+                    if (strings.hasPrefixComptime(base, "./") or strings.hasPrefixComptime(base, ".\\"))
                         return strings.copy(&this.buf, base[2..]);
                     return strings.copy(&this.buf, base);
                 },
@@ -266,32 +538,57 @@ pub const Bin = extern struct {
         }
     };
 
+    pub const PriorityQueueContext = struct {
+        dependencies: *const std.ArrayListUnmanaged(Dependency),
+        string_buf: *const std.ArrayListUnmanaged(u8),
+
+        pub fn lessThan(this: PriorityQueueContext, a: Install.DependencyID, b: Install.DependencyID) std.math.Order {
+            const deps = this.dependencies.items;
+            const buf = this.string_buf.items;
+            const a_name = deps[a].name.slice(buf);
+            const b_name = deps[b].name.slice(buf);
+            return strings.order(a_name, b_name);
+        }
+    };
+
+    pub const PriorityQueue = std.PriorityQueue(Install.DependencyID, PriorityQueueContext, PriorityQueueContext.lessThan);
+
+    // https://github.com/npm/npm-normalize-package-bin/blob/574e6d7cd21b2f3dee28a216ec2053c2551f7af9/lib/index.js#L38
+    pub fn normalizedBinName(name: []const u8) []const u8 {
+        if (std.mem.lastIndexOfAny(u8, name, "/\\:")) |i| {
+            return name[i + 1 ..];
+        }
+
+        return name;
+    }
+
     pub const Linker = struct {
         bin: Bin,
 
-        package_installed_node_modules: bun.FileDescriptor = bun.invalid_fd,
-        root_node_modules_folder: bun.FileDescriptor = bun.invalid_fd,
+        // Hash map of seen destination paths for this `node_modules/.bin` folder. PackageInstaller will reset it before
+        // linking each tree.
+        seen: ?*bun.StringHashMap(void),
+
+        node_modules: bun.FileDescriptor,
+        node_modules_path: []const u8,
 
         /// Used for generating relative paths
         package_name: strings.StringOrTinyString,
 
-        global_bin_dir: std.fs.Dir,
         global_bin_path: stringZ = "",
-
-        relative_path_to_bin_for_windows_global_link_offset: usize = 0,
 
         string_buf: []const u8,
         extern_string_buf: []const ExternalString,
+
+        abs_target_buf: []u8,
+        abs_dest_buf: []u8,
+        rel_buf: []u8,
 
         err: ?anyerror = null,
 
         pub var umask: bun.C.Mode = 0;
 
         var has_set_umask = false;
-
-        pub const Error = error{
-            NotImplementedYet,
-        } || std.os.SymLinkError || std.os.OpenError || std.os.RealPathError;
 
         pub fn ensureUmask() void {
             if (!has_set_umask) {
@@ -300,395 +597,370 @@ pub const Bin = extern struct {
             }
         }
 
-        fn unscopedPackageName(name: []const u8) []const u8 {
-            if (name[0] != '@') return name;
-            var name_ = name;
-            name_ = name[1..];
-            return name_[(strings.indexOfChar(name_, '/') orelse return name) + 1 ..];
-        }
-
-        fn setPermissions(folder: std.os.fd_t, target: [:0]const u8) void {
-            // we use fchmodat to avoid any issues with current working directory
-            _ = C.fchmodat(folder, target, @intCast(umask | 0o777), 0);
-        }
-
-        fn setSymlinkAndPermissions(this: *Linker, target_path: [:0]const u8, dest_path: [:0]const u8, link_global: bool) void {
+        fn unlinkBinOrShim(abs_dest: [:0]const u8) void {
             if (comptime !Environment.isWindows) {
-                const node_modules = this.package_installed_node_modules.asDir();
-                std.os.symlinkatZ(target_path, node_modules.fd, dest_path) catch |err| {
-                    // Silently ignore PathAlreadyExists if the symlink is valid.
-                    // Most likely, the symlink was already created by another package
-                    if (err == error.PathAlreadyExists) {
-                        if (PackageInstall.isDanglingSymlink(dest_path)) {
-                            // this case is hit if the package was previously and the bin is located in a different directory
-                            node_modules.deleteFileZ(dest_path) catch |err2| {
-                                this.err = err2;
-                                return;
-                            };
+                _ = bun.sys.unlink(abs_dest);
+                return;
+            }
 
-                            std.os.symlinkatZ(target_path, node_modules.fd, dest_path) catch |err2| {
-                                this.err = err2;
-                                return;
-                            };
+            var dest_buf: bun.WPathBuffer = undefined;
+            const abs_dest_w = strings.convertUTF8toUTF16InBuffer(&dest_buf, abs_dest);
+            @memcpy(dest_buf[abs_dest_w.len..][0..".bunx\x00".len], comptime strings.literal(u16, ".bunx\x00"));
+            const abs_bunx_file: [:0]const u16 = dest_buf[0 .. abs_dest_w.len + ".bunx".len :0];
+            _ = bun.sys.unlinkW(abs_bunx_file);
+            @memcpy(dest_buf[abs_dest_w.len..][0..".exe\x00".len], comptime strings.literal(u16, ".exe\x00"));
+            const abs_exe_file: [:0]const u16 = dest_buf[0 .. abs_dest_w.len + ".exe".len :0];
+            _ = bun.sys.unlinkW(abs_exe_file);
+        }
 
-                            setPermissions(node_modules.fd, dest_path);
-                            return;
-                        }
+        fn linkBinOrCreateShim(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+            bun.assertWithLocation(std.fs.path.isAbsolute(abs_target), @src());
+            bun.assertWithLocation(std.fs.path.isAbsolute(abs_dest), @src());
+            bun.assertWithLocation(abs_target[abs_target.len - 1] != std.fs.path.sep, @src());
+            bun.assertWithLocation(abs_dest[abs_dest.len - 1] != std.fs.path.sep, @src());
 
-                        setPermissions(node_modules.fd, dest_path);
-                        var target_path_trim = target_path;
-                        if (strings.hasPrefix(target_path_trim, "../")) {
-                            target_path_trim = target_path_trim[3..];
-                        }
-                        setPermissions(node_modules.fd, target_path_trim);
-                        return;
+            if (this.seen) |seen| {
+                // Skip seen destinations for this tree
+                // https://github.com/npm/cli/blob/22731831e22011e32fa0ca12178e242c2ee2b33d/node_modules/bin-links/lib/link-gently.js#L30
+                const entry = seen.getOrPut(abs_dest) catch bun.outOfMemory();
+                if (entry.found_existing) {
+                    return;
+                }
+                entry.key_ptr.* = seen.allocator.dupe(u8, abs_dest) catch bun.outOfMemory();
+            }
+
+            // Skip if the target does not exist. This is important because placing a dangling
+            // shim in path might break a postinstall
+            if (!bun.sys.exists(abs_target)) {
+                return;
+            }
+
+            bun.Analytics.Features.binlinks += 1;
+
+            if (comptime !Environment.isWindows)
+                this.createSymlink(abs_target, abs_dest, global)
+            else {
+                const target = bun.sys.openat(bun.invalid_fd, abs_target, bun.O.RDONLY, 0).unwrap() catch |err| {
+                    if (err != error.EISDIR) {
+                        // ignore directories, creating a shim for one won't do anything
+                        this.err = err;
                     }
-
-                    this.err = err;
                     return;
                 };
-                setPermissions(node_modules.fd, dest_path);
+                defer _ = bun.sys.close(target);
+                this.createWindowsShim(target, abs_target, abs_dest, global);
+            }
+
+            if (this.err != null) {
+                // cleanup on error just in case
+                unlinkBinOrShim(abs_dest);
                 return;
-            } else {
-                const WinBinLinkingShim = @import("./windows-shim/BinLinkingShim.zig");
+            }
 
-                const node_modules = if (link_global)
-                    this.global_bin_dir
-                else
-                    this.package_installed_node_modules.asDir();
+            if (comptime !Environment.isWindows) {
+                // any error here is ignored
+                const bin = bun.sys.File.openat(bun.invalid_fd, abs_target, bun.O.RDWR, 0o664).unwrap() catch return;
+                defer bin.close();
 
-                var shim_buf: [65536]u8 = undefined;
-                var read_in_buf: [WinBinLinkingShim.Shebang.max_shebang_input_length]u8 = undefined;
-                var filename1_buf: bun.WPathBuffer = undefined;
-                var filename2_buf: bun.WPathBuffer = undefined;
-                var filename3_buf: bun.WPathBuffer = undefined;
+                var shebang_buf: [1024]u8 = undefined;
+                const read = bin.read(&shebang_buf).unwrap() catch return;
+                const chunk = shebang_buf[0..read];
+                // 123 4 5
+                // #!a\r\n
+                if (chunk.len < 5 or chunk[0] != '#' or chunk[1] != '!') return;
 
-                if (comptime Environment.allow_assert) {
-                    bun.assert(strings.hasPrefixComptime(target_path, "..\\"));
-                }
-
-                const target_wpath = bun.strings.toWPathNormalized(&filename1_buf, target_path[3..]);
-                var destination_wpath: []u16 = bun.strings.convertUTF8toUTF16InBuffer(&filename2_buf, dest_path);
-
-                destination_wpath.len += 5;
-                @memcpy(destination_wpath[destination_wpath.len - 5 ..], &[_]u16{ '.', 'b', 'u', 'n', 'x' });
-                {
-                    const file = node_modules.createFileW(destination_wpath, .{
-                        .truncate = true,
-                        .exclusive = true,
-                    }) catch |open_err| fd: {
-                        if (open_err == error.PathAlreadyExists) {
-                            // we need to verify this link is valid, otherwise regenerate it
-                            if (PackageInstall.isDanglingWindowsBinLink(bun.toFD(node_modules.fd), destination_wpath, &shim_buf)) {
-                                break :fd node_modules.createFileW(destination_wpath, .{
-                                    .truncate = true,
-                                }) catch |second_open_err| {
-                                    this.err = second_open_err;
-                                    return;
-                                };
-                            }
-
-                            // otherwise it is ok to skip the rest
-                            return;
-                        }
-                        this.err = open_err;
-                        return;
-                    };
-                    defer file.close();
-
-                    const shebang = shebang: {
-                        const first_content_chunk = contents: {
-                            const fd = bun.sys.openatWindows(
-                                this.package_installed_node_modules,
-                                if (link_global)
-                                    bun.strings.toWPathNormalized(
-                                        &filename3_buf,
-                                        target_path[this.relative_path_to_bin_for_windows_global_link_offset..],
-                                    )
-                                else
-                                    target_wpath,
-                                std.os.O.RDONLY,
-                            ).unwrap() catch break :contents null;
-                            defer _ = bun.sys.close(fd);
-                            const reader = fd.asFile().reader();
-                            const read = reader.read(&read_in_buf) catch break :contents null;
-                            if (read == 0) {
-                                break :contents null;
-                            }
-                            break :contents read_in_buf[0..read];
-                        };
-
-                        if (first_content_chunk) |chunk| {
-                            break :shebang WinBinLinkingShim.Shebang.parse(chunk, target_wpath) catch {
-                                this.err = error.InvalidBinContent;
-                                return;
-                            };
-                        } else {
-                            break :shebang WinBinLinkingShim.Shebang.parseFromBinPath(target_wpath);
-                        }
-                    };
-
-                    const shim = WinBinLinkingShim{
-                        .bin_path = target_wpath,
-                        .shebang = shebang,
-                    };
-
-                    const len = shim.encodedLength();
-                    if (len > shim_buf.len) {
-                        this.err = error.InvalidBinContent;
-                        return;
+                if (strings.indexOfChar(chunk, '\n')) |newline| {
+                    if (newline > 0 and chunk[newline - 1] == '\r') {
+                        const pos = newline - 1;
+                        bin.handle.asFile().seekTo(pos) catch return;
+                        bin.writeAll("\n").unwrap() catch return;
                     }
-                    const metadata = shim_buf[0..len];
-                    shim.encodeInto(metadata) catch {
-                        this.err = error.InvalidBinContent;
-                        return;
-                    };
-
-                    file.writer().writeAll(metadata) catch |err| {
-                        this.err = err;
-                        return;
-                    };
-                }
-
-                destination_wpath.len -= 1;
-                @memcpy(destination_wpath[destination_wpath.len - 3 ..], &[_]u16{ 'e', 'x', 'e' });
-
-                // truncate=false is intentional so that the exe is always rewritten. this helps
-                // - you upgrade to a new version of bin_shim_impl (unlikely but possible)
-                // - if otherwise corrupt it yourself
-                if (node_modules.createFileW(destination_wpath, .{})) |exe_file| {
-                    defer exe_file.close();
-                    exe_file.writer().writeAll(WinBinLinkingShim.embedded_executable_data) catch |err| {
-                        this.err = err;
-                        return;
-                    };
-                } else |err| {
-                    this.err = err;
                 }
             }
         }
 
-        const dot_bin = ".bin" ++ std.fs.path.sep_str;
+        fn createWindowsShim(this: *Linker, target: bun.FileDescriptor, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+            const WinBinLinkingShim = @import("./windows-shim/BinLinkingShim.zig");
 
-        // It is important that we use symlinkat(2) with relative paths instead of symlink()
-        // That way, if you move your node_modules folder around, the symlinks in .bin still work
-        // If we used absolute paths for the symlinks, you'd end up with broken symlinks
-        pub fn link(this: *Linker, link_global: bool) void {
-            var target_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-            var dest_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-            var from_remain: []u8 = &target_buf;
-            var remain: []u8 = &dest_buf;
+            var shim_buf: [65536]u8 = undefined;
+            var read_in_buf: [WinBinLinkingShim.Shebang.max_shebang_input_length]u8 = undefined;
+            var dest_buf: bun.WPathBuffer = undefined;
+            var target_buf: bun.WPathBuffer = undefined;
 
-            if (!link_global) {
-                const root_dir = this.package_installed_node_modules.asDir();
-                const from = root_dir.realpath(dot_bin, &target_buf) catch |realpath_err| brk: {
-                    if (realpath_err == error.FileNotFound) {
-                        if (comptime Environment.isWindows) {
-                            std.os.mkdiratW(root_dir.fd, comptime bun.OSPathLiteral(".bin"), 0) catch |err| {
-                                this.err = err;
-                                return;
-                            };
-                        } else {
-                            root_dir.makeDirZ(".bin") catch |err| {
-                                this.err = err;
-                                return;
-                            };
-                        }
+            const abs_dest_w = strings.convertUTF8toUTF16InBuffer(&dest_buf, abs_dest);
+            @memcpy(dest_buf[abs_dest_w.len..][0..".bunx\x00".len], comptime strings.literal(u16, ".bunx\x00"));
 
-                        break :brk root_dir.realpath(dot_bin, &target_buf) catch |err| {
-                            this.err = err;
-                            return;
-                        };
-                    }
+            const abs_bunx_file: [:0]const u16 = dest_buf[0 .. abs_dest_w.len + ".bunx".len :0];
 
-                    this.err = realpath_err;
-                    return;
-                };
-                const to = bun.getFdPath(this.package_installed_node_modules, &dest_buf) catch |err| {
+            const bunx_file = bun.sys.File.openatOSPath(bun.invalid_fd, abs_bunx_file, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664).unwrap() catch |err| bunx_file: {
+                if (err != error.ENOENT or global) {
                     this.err = err;
                     return;
+                }
+
+                bun.makePath(this.node_modules.asDir(), ".bin") catch {};
+                break :bunx_file bun.sys.File.openatOSPath(bun.invalid_fd, abs_bunx_file, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664).unwrap() catch |real_err| {
+                    this.err = real_err;
+                    return;
                 };
-                const rel = Path.relative(from, to);
-                bun.copy(u8, remain, rel);
-                remain = remain[rel.len..];
-                remain[0] = std.fs.path.sep;
-                remain = remain[1..];
-                from_remain[0..dot_bin.len].* = dot_bin.*;
-                from_remain = from_remain[dot_bin.len..];
-            } else {
-                if (bun.toFD(this.global_bin_dir.fd) == bun.invalid_fd) {
-                    this.err = error.MissingGlobalBinDir;
+            };
+            defer bunx_file.close();
+
+            const rel_target = path.relativeBufZ(this.rel_buf, path.dirname(abs_dest, .auto), abs_target);
+            bun.assertWithLocation(strings.hasPrefixComptime(rel_target, "..\\"), @src());
+
+            const rel_target_w = strings.toWPathNormalized(&target_buf, rel_target["..\\".len..]);
+
+            const shebang = shebang: {
+                const first_content_chunk = contents: {
+                    const reader = target.asFile().reader();
+                    const read = reader.read(&read_in_buf) catch break :contents null;
+                    if (read == 0) break :contents null;
+                    break :contents read_in_buf[0..read];
+                };
+
+                if (first_content_chunk) |chunk| {
+                    break :shebang WinBinLinkingShim.Shebang.parse(chunk, rel_target_w) catch {
+                        this.err = error.InvalidBinCount;
+                        return;
+                    };
+                } else {
+                    break :shebang WinBinLinkingShim.Shebang.parseFromBinPath(rel_target_w);
+                }
+            };
+
+            const shim = WinBinLinkingShim{
+                .bin_path = rel_target_w,
+                .shebang = shebang,
+            };
+
+            const len = shim.encodedLength();
+            if (len > shim_buf.len) {
+                this.err = error.InvalidBinContent;
+                return;
+            }
+
+            const metadata = shim_buf[0..len];
+            shim.encodeInto(metadata) catch {
+                this.err = error.InvalidBinContent;
+                return;
+            };
+
+            bunx_file.writer().writeAll(metadata) catch |err| {
+                this.err = err;
+                return;
+            };
+
+            @memcpy(dest_buf[abs_dest_w.len..][0..".exe\x00".len], comptime strings.literal(u16, ".exe\x00"));
+            const abs_exe_file: [:0]const u16 = dest_buf[0 .. abs_dest_w.len + ".exe".len :0];
+
+            bun.sys.File.writeFile(bun.invalid_fd, abs_exe_file, WinBinLinkingShim.embedded_executable_data).unwrap() catch |err| {
+                if (err == error.EBUSY) {
+                    // exe is most likely running. bunx file has already been updated, ignore error
                     return;
                 }
 
-                if (comptime Environment.isWindows) {
-                    const from = this.global_bin_path;
-                    const to = bun.getFdPath(this.package_installed_node_modules, &dest_buf) catch |err| {
-                        this.err = err;
-                        return;
-                    };
+                this.err = err;
+                return;
+            };
+        }
 
-                    const rel = Path.relative(from, to);
-                    @memcpy(remain[0..rel.len], rel);
-                    remain = remain[rel.len..];
-                    remain[0] = std.fs.path.sep;
-                    remain = remain[1..];
-                } else {
-                    bun.copy(u8, &target_buf, this.global_bin_path);
-                    from_remain = target_buf[this.global_bin_path.len..];
-                    from_remain[0] = std.fs.path.sep;
-                    from_remain = from_remain[1..];
-                    const abs = bun.getFdPath(this.root_node_modules_folder, &dest_buf) catch |err| {
-                        this.err = err;
-                        return;
-                    };
-                    remain = remain[abs.len..];
-                    remain[0] = std.fs.path.sep;
-                    remain = remain[1..];
+        fn createSymlink(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+            defer {
+                if (this.err == null) {
+                    _ = bun.sys.chmod(abs_target, umask | 0o777);
                 }
-
-                this.root_node_modules_folder = bun.toFD(this.global_bin_dir.fd);
             }
 
-            if (comptime Environment.isWindows and link_global) {
-                this.relative_path_to_bin_for_windows_global_link_offset = dest_buf.len - remain.len;
+            const abs_dest_dir = path.dirname(abs_dest, .auto);
+            const rel_target = path.relativeBufZ(this.rel_buf, abs_dest_dir, abs_target);
+
+            bun.assertWithLocation(strings.hasPrefixComptime(rel_target, ".."), @src());
+
+            switch (bun.sys.symlink(rel_target, abs_dest)) {
+                .err => |err| {
+                    if (err.getErrno() != .EXIST and err.getErrno() != .NOENT) {
+                        this.err = err.toZigErr();
+                        return;
+                    }
+
+                    // ENOENT means `.bin` hasn't been created yet. Should only happen if this isn't global
+                    if (err.getErrno() == .NOENT) {
+                        if (global) {
+                            this.err = err.toZigErr();
+                            return;
+                        }
+
+                        bun.makePath(this.node_modules.asDir(), ".bin") catch {};
+                        switch (bun.sys.symlink(rel_target, abs_dest)) {
+                            .err => |real_error| {
+                                // It was just created, no need to delete destination and symlink again
+                                this.err = real_error.toZigErr();
+                                return;
+                            },
+                            .result => return,
+                        }
+                        bun.sys.symlink(rel_target, abs_dest).unwrap() catch |real_err| {
+                            this.err = real_err;
+                        };
+                        return;
+                    }
+
+                    // beyond this error can only be `.EXIST`
+                    bun.assertWithLocation(err.getErrno() == .EXIST, @src());
+                },
+                .result => return,
             }
 
-            const name = this.package_name.slice();
-            bun.copy(u8, remain, name);
-            remain = remain[name.len..];
+            // delete and try again
+            std.fs.deleteTreeAbsolute(abs_dest) catch {};
+            bun.sys.symlink(rel_target, abs_dest).unwrap() catch |err| {
+                this.err = err;
+            };
+        }
+
+        /// uses `this.abs_target_buf`
+        pub fn buildTargetPackageDir(this: *const Linker) []const u8 {
+            const dest_dir_without_trailing_slash = strings.withoutTrailingSlash(this.node_modules_path);
+
+            var remain = this.abs_target_buf;
+
+            @memcpy(remain[0..dest_dir_without_trailing_slash.len], dest_dir_without_trailing_slash);
+            remain = remain[dest_dir_without_trailing_slash.len..];
             remain[0] = std.fs.path.sep;
-
             remain = remain[1..];
 
+            const package_name = this.package_name.slice();
+            @memcpy(remain[0..package_name.len], package_name);
+            remain = remain[package_name.len..];
+            remain[0] = std.fs.path.sep;
+            remain = remain[1..];
+
+            return this.abs_target_buf[0 .. @intFromPtr(remain.ptr) - @intFromPtr(this.abs_target_buf.ptr)];
+        }
+
+        pub fn buildDestinationDir(this: *const Linker, global: bool) []u8 {
+            const dest_dir_without_trailing_slash = strings.withoutTrailingSlash(this.node_modules_path);
+
+            var remain = this.abs_dest_buf;
+            if (global) {
+                const global_bin_path_without_trailing_slash = strings.withoutTrailingSlash(this.global_bin_path);
+                @memcpy(remain[0..global_bin_path_without_trailing_slash.len], global_bin_path_without_trailing_slash);
+                remain = remain[global_bin_path_without_trailing_slash.len..];
+                remain[0] = std.fs.path.sep;
+                remain = remain[1..];
+            } else {
+                @memcpy(remain[0..dest_dir_without_trailing_slash.len], dest_dir_without_trailing_slash);
+                remain = remain[dest_dir_without_trailing_slash.len..];
+                @memcpy(remain[0.."/.bin/".len], std.fs.path.sep_str ++ ".bin" ++ std.fs.path.sep_str);
+                remain = remain["/.bin/".len..];
+            }
+
+            return remain;
+        }
+
+        // target: what the symlink points to
+        // destination: where the symlink exists on disk
+        pub fn link(this: *Linker, global: bool) void {
+            const package_dir = this.buildTargetPackageDir();
+            var abs_dest_buf_remain = this.buildDestinationDir(global);
+
+            bun.assertWithLocation(this.bin.tag != .none, @src());
+
             switch (this.bin.tag) {
-                .none => {
-                    if (Environment.allow_assert) {
-                        @panic("unexpected .null when linking binary");
-                    }
-                },
+                .none => {},
                 .file => {
-                    var target = this.bin.value.file.slice(this.string_buf);
+                    const target = this.bin.value.file.slice(this.string_buf);
+                    if (target.len == 0) return;
 
-                    if (strings.hasPrefixComptime(target, "./")) {
-                        target = target["./".len..];
-                    }
-                    bun.copy(u8, remain, target);
-                    remain = remain[target.len..];
-                    remain[0] = 0;
-                    const target_len = @intFromPtr(remain.ptr) - @intFromPtr(&dest_buf);
-                    remain = remain[1..];
+                    // for normalizing `target`
+                    const abs_target = path.joinAbsStringZ(package_dir, &.{target}, .auto);
 
-                    const target_path: [:0]u8 = dest_buf[0..target_len :0];
-                    // we need to use the unscoped package name here
-                    // this is why @babel/parser would fail to link
-                    const unscoped_name = unscopedPackageName(name);
-                    bun.copy(u8, from_remain, unscoped_name);
-                    from_remain = from_remain[unscoped_name.len..];
-                    from_remain[0] = 0;
-                    const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                    const unscoped_package_name = Dependency.unscopedPackageName(this.package_name.slice());
+                    @memcpy(abs_dest_buf_remain[0..unscoped_package_name.len], unscoped_package_name);
+                    abs_dest_buf_remain = abs_dest_buf_remain[unscoped_package_name.len..];
+                    abs_dest_buf_remain[0] = 0;
+                    const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                    const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                    this.setSymlinkAndPermissions(target_path, dest_path, link_global);
+                    this.linkBinOrCreateShim(abs_target, abs_dest, global);
                 },
                 .named_file => {
-                    var target = this.bin.value.named_file[1].slice(this.string_buf);
-                    if (strings.hasPrefixComptime(target, "./")) {
-                        target = target["./".len..];
-                    }
-                    bun.copy(u8, remain, target);
-                    remain = remain[target.len..];
-                    remain[0] = 0;
-                    const target_len = @intFromPtr(remain.ptr) - @intFromPtr(&dest_buf);
-                    remain = remain[1..];
+                    const name = this.bin.value.named_file[0].slice(this.string_buf);
+                    const normalized_name = normalizedBinName(name);
+                    const target = this.bin.value.named_file[1].slice(this.string_buf);
+                    if (normalized_name.len == 0 or target.len == 0) return;
 
-                    const target_path: [:0]u8 = dest_buf[0..target_len :0];
-                    const name_to_use = this.bin.value.named_file[0].slice(this.string_buf);
-                    bun.copy(u8, from_remain, name_to_use);
-                    from_remain = from_remain[name_to_use.len..];
-                    from_remain[0] = 0;
-                    const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                    // for normalizing `target`
+                    const abs_target = path.joinAbsStringZ(package_dir, &.{target}, .auto);
 
-                    this.setSymlinkAndPermissions(target_path, dest_path, link_global);
+                    @memcpy(abs_dest_buf_remain[0..normalized_name.len], normalized_name);
+                    abs_dest_buf_remain = abs_dest_buf_remain[normalized_name.len..];
+                    abs_dest_buf_remain[0] = 0;
+                    const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                    const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
+
+                    this.linkBinOrCreateShim(abs_target, abs_dest, global);
                 },
                 .map => {
-                    var extern_string_i: u32 = this.bin.value.map.off;
-                    const end = this.bin.value.map.len + extern_string_i;
-                    const _from_remain = from_remain;
-                    const _remain = remain;
+                    var i = this.bin.value.map.begin();
+                    const end = this.bin.value.map.end();
 
-                    while (extern_string_i < end) : (extern_string_i += 2) {
-                        from_remain = _from_remain;
-                        remain = _remain;
-                        const name_in_terminal = this.extern_string_buf[extern_string_i];
-                        const name_in_filesystem = this.extern_string_buf[extern_string_i + 1];
+                    const abs_dest_dir_end = abs_dest_buf_remain;
 
-                        var target = name_in_filesystem.slice(this.string_buf);
-                        if (strings.hasPrefixComptime(target, "./")) {
-                            target = target["./".len..];
-                        }
-                        bun.copy(u8, remain, target);
-                        remain = remain[target.len..];
-                        remain[0] = 0;
-                        const target_len = @intFromPtr(remain.ptr) - @intFromPtr(&dest_buf);
-                        remain = remain[1..];
+                    while (i < end) : (i += 2) {
+                        const bin_dest = this.extern_string_buf[i].slice(this.string_buf);
+                        const normalized_bin_dest = normalizedBinName(bin_dest);
+                        const bin_target = this.extern_string_buf[i + 1].slice(this.string_buf);
+                        if (bin_target.len == 0 or normalized_bin_dest.len == 0) continue;
 
-                        const target_path: [:0]u8 = dest_buf[0..target_len :0];
-                        const name_to_use = name_in_terminal.slice(this.string_buf);
-                        bun.copy(u8, from_remain, name_to_use);
-                        from_remain = from_remain[name_to_use.len..];
-                        from_remain[0] = 0;
-                        const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                        const abs_target = path.joinAbsStringZ(package_dir, &.{bin_target}, .auto);
 
-                        this.setSymlinkAndPermissions(target_path, dest_path, link_global);
+                        abs_dest_buf_remain = abs_dest_dir_end;
+                        @memcpy(abs_dest_buf_remain[0..normalized_bin_dest.len], normalized_bin_dest);
+                        abs_dest_buf_remain = abs_dest_buf_remain[normalized_bin_dest.len..];
+                        abs_dest_buf_remain[0] = 0;
+                        const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                        const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
+
+                        this.linkBinOrCreateShim(abs_target, abs_dest, global);
                     }
                 },
                 .dir => {
-                    var target = this.bin.value.dir.slice(this.string_buf);
-                    if (strings.hasPrefixComptime(target, "./")) {
-                        target = target["./".len..];
-                    }
+                    const target = this.bin.value.dir.slice(this.string_buf);
+                    if (target.len == 0) return;
 
-                    var parts = [_][]const u8{ name, target };
+                    // for normalizing `target`
+                    const abs_target_dir = path.joinAbsStringZ(package_dir, &.{target}, .auto);
 
-                    bun.copy(u8, remain, target);
-                    remain = remain[target.len..];
-
-                    const dir = this.package_installed_node_modules.asDir();
-
-                    var joined = Path.joinStringBuf(&target_buf, &parts, .auto);
-                    @as([*]u8, @ptrFromInt(@intFromPtr(joined.ptr)))[joined.len] = 0;
-                    const joined_: [:0]const u8 = joined.ptr[0..joined.len :0];
-                    var child_dir = bun.openDir(dir, joined_) catch |err| {
+                    var target_dir = bun.openDirAbsolute(abs_target_dir) catch |err| {
+                        if (err == error.ENOENT) {
+                            // https://github.com/npm/cli/blob/366c07e2f3cb9d1c6ddbd03e624a4d73fbd2676e/node_modules/bin-links/lib/link-gently.js#L43
+                            // avoid erroring when the directory does not exist
+                            return;
+                        }
                         this.err = err;
                         return;
                     };
-                    defer child_dir.close();
+                    defer target_dir.close();
 
-                    var iter = child_dir.iterate();
+                    const abs_dest_dir_end = abs_dest_buf_remain;
 
-                    const basedir_path = bun.getFdPath(child_dir.fd, &target_buf) catch |err| {
-                        this.err = err;
-                        return;
-                    };
-                    target_buf[basedir_path.len] = std.fs.path.sep;
-                    var target_buf_remain = target_buf[basedir_path.len + 1 ..];
-                    const prev_target_buf_remain = target_buf_remain;
-
-                    while (iter.next() catch null) |entry_| {
-                        const entry: std.fs.Dir.Entry = entry_;
+                    var iter = target_dir.iterate();
+                    while (iter.next() catch null) |entry| {
                         switch (entry.kind) {
-                            std.fs.Dir.Entry.Kind.sym_link, std.fs.Dir.Entry.Kind.file => {
-                                target_buf_remain = prev_target_buf_remain;
-                                bun.copy(u8, target_buf_remain, entry.name);
-                                target_buf_remain = target_buf_remain[entry.name.len..];
-                                target_buf_remain[0] = 0;
-                                const from_path: [:0]u8 = target_buf[0 .. @intFromPtr(target_buf_remain.ptr) - @intFromPtr(&target_buf) :0];
-                                const to_path = if (!link_global)
-                                    std.fmt.bufPrintZ(&dest_buf, dot_bin ++ "{s}", .{entry.name}) catch continue
-                                else
-                                    std.fmt.bufPrintZ(&dest_buf, "{s}", .{entry.name}) catch continue;
+                            .sym_link, .file => {
+                                // `this.abs_target_buf` is available now because `path.joinAbsStringZ` copied everything into `parse_join_input_buffer`
+                                const abs_target = path.joinAbsStringBufZ(abs_target_dir, this.abs_target_buf, &.{entry.name}, .auto);
 
-                                this.setSymlinkAndPermissions(from_path, to_path, link_global);
+                                abs_dest_buf_remain = abs_dest_dir_end;
+                                @memcpy(abs_dest_buf_remain[0..entry.name.len], entry.name);
+                                abs_dest_buf_remain = abs_dest_buf_remain[entry.name.len..];
+                                abs_dest_buf_remain[0] = 0;
+                                const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                                const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
+
+                                this.linkBinOrCreateShim(abs_target, abs_dest, global);
                             },
                             else => {},
                         }
@@ -697,149 +969,84 @@ pub const Bin = extern struct {
             }
         }
 
-        pub fn unlink(this: *Linker, link_global: bool) void {
-            var target_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-            var dest_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-            var from_remain: []u8 = &target_buf;
-            var remain: []u8 = &dest_buf;
+        pub fn unlink(this: *Linker, global: bool) void {
+            const package_dir = this.buildTargetPackageDir();
+            var abs_dest_buf_remain = this.buildDestinationDir(global);
 
-            if (!link_global) {
-                target_buf[0..dot_bin.len].* = dot_bin.*;
-                from_remain = target_buf[dot_bin.len..];
-                dest_buf[0.."../".len].* = "../".*;
-                remain = dest_buf["../".len..];
-            } else {
-                if (bun.toFD(this.global_bin_dir.fd) == bun.invalid_fd) {
-                    this.err = error.MissingGlobalBinDir;
-                    return;
-                }
-
-                @memcpy(target_buf[0..this.global_bin_path.len], this.global_bin_path);
-                from_remain = target_buf[this.global_bin_path.len..];
-                from_remain[0] = std.fs.path.sep;
-                from_remain = from_remain[1..];
-                const abs = bun.getFdPath(this.root_node_modules_folder, &dest_buf) catch |err| {
-                    this.err = err;
-                    return;
-                };
-                remain = remain[abs.len..];
-                remain[0] = std.fs.path.sep;
-                remain = remain[1..];
-
-                this.root_node_modules_folder = bun.toFD(this.global_bin_dir.fd);
-            }
-
-            const name = this.package_name.slice();
-            bun.copy(u8, remain, name);
-            remain = remain[name.len..];
-            remain[0] = std.fs.path.sep;
-            remain = remain[1..];
+            bun.assertWithLocation(this.bin.tag != .none, @src());
 
             switch (this.bin.tag) {
-                .none => {
-                    if (comptime Environment.isDebug) {
-                        unreachable;
-                    }
-                },
+                .none => {},
                 .file => {
-                    // we need to use the unscoped package name here
-                    // this is why @babel/parser would fail to link
-                    const unscoped_name = unscopedPackageName(name);
-                    bun.copy(u8, from_remain, unscoped_name);
-                    from_remain = from_remain[unscoped_name.len..];
-                    from_remain[0] = 0;
-                    const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                    const unscoped_package_name = Dependency.unscopedPackageName(this.package_name.slice());
+                    @memcpy(abs_dest_buf_remain[0..unscoped_package_name.len], unscoped_package_name);
+                    abs_dest_buf_remain = abs_dest_buf_remain[unscoped_package_name.len..];
+                    abs_dest_buf_remain[0] = 0;
+                    const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                    const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                    std.os.unlinkatZ(this.root_node_modules_folder.cast(), dest_path, 0) catch {};
+                    unlinkBinOrShim(abs_dest);
                 },
                 .named_file => {
-                    const name_to_use = this.bin.value.named_file[0].slice(this.string_buf);
-                    bun.copy(u8, from_remain, name_to_use);
-                    from_remain = from_remain[name_to_use.len..];
-                    from_remain[0] = 0;
-                    const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                    const name = this.bin.value.named_file[0].slice(this.string_buf);
+                    const normalized_name = normalizedBinName(name);
+                    if (normalized_name.len == 0) return;
 
-                    std.os.unlinkatZ(this.root_node_modules_folder.cast(), dest_path, 0) catch {};
+                    @memcpy(abs_dest_buf_remain[0..normalized_name.len], normalized_name);
+                    abs_dest_buf_remain = abs_dest_buf_remain[normalized_name.len..];
+                    abs_dest_buf_remain[0] = 0;
+                    const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                    const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
+
+                    unlinkBinOrShim(abs_dest);
                 },
                 .map => {
-                    var extern_string_i: u32 = this.bin.value.map.off;
-                    const end = this.bin.value.map.len + extern_string_i;
-                    const _from_remain = from_remain;
-                    const _remain = remain;
-                    while (extern_string_i < end) : (extern_string_i += 2) {
-                        from_remain = _from_remain;
-                        remain = _remain;
-                        const name_in_terminal = this.extern_string_buf[extern_string_i];
-                        const name_in_filesystem = this.extern_string_buf[extern_string_i + 1];
+                    var i = this.bin.value.map.begin();
+                    const end = this.bin.value.map.end();
 
-                        var target = name_in_filesystem.slice(this.string_buf);
-                        if (strings.hasPrefix(target, "./")) {
-                            target = target[2..];
-                        }
-                        bun.copy(u8, remain, target);
-                        remain = remain[target.len..];
-                        remain[0] = 0;
-                        remain = remain[1..];
+                    const abs_dest_dir_end = abs_dest_buf_remain;
 
-                        const name_to_use = name_in_terminal.slice(this.string_buf);
-                        bun.copy(u8, from_remain, name_to_use);
-                        from_remain = from_remain[name_to_use.len..];
-                        from_remain[0] = 0;
-                        const dest_path: [:0]u8 = target_buf[0 .. @intFromPtr(from_remain.ptr) - @intFromPtr(&target_buf) :0];
+                    while (i < end) : (i += 2) {
+                        const bin_dest = this.extern_string_buf[i].slice(this.string_buf);
+                        const normalized_bin_dest = normalizedBinName(bin_dest);
+                        if (normalized_bin_dest.len == 0) continue;
 
-                        std.os.unlinkatZ(this.root_node_modules_folder.cast(), dest_path, 0) catch {};
+                        abs_dest_buf_remain = abs_dest_dir_end;
+                        @memcpy(abs_dest_buf_remain[0..normalized_bin_dest.len], normalized_bin_dest);
+                        abs_dest_buf_remain = abs_dest_buf_remain[normalized_bin_dest.len..];
+                        abs_dest_buf_remain[0] = 0;
+                        const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                        const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
+
+                        unlinkBinOrShim(abs_dest);
                     }
                 },
                 .dir => {
-                    var target = this.bin.value.dir.slice(this.string_buf);
-                    if (strings.hasPrefix(target, "./")) {
-                        target = target[2..];
-                    }
+                    const target = this.bin.value.dir.slice(this.string_buf);
+                    if (target.len == 0) return;
 
-                    var parts = [_][]const u8{ name, target };
+                    const abs_target_dir = path.joinAbsStringZ(package_dir, &.{target}, .auto);
 
-                    bun.copy(u8, remain, target);
-                    remain = remain[target.len..];
-
-                    const dir = this.package_installed_node_modules.asDir();
-
-                    var joined = Path.joinStringBuf(&target_buf, &parts, .auto);
-                    @as([*]u8, @ptrFromInt(@intFromPtr(joined.ptr)))[joined.len] = 0;
-                    const joined_: [:0]const u8 = joined.ptr[0..joined.len :0];
-                    var child_dir = bun.openDir(dir, joined_) catch |err| {
+                    var target_dir = bun.openDirAbsolute(abs_target_dir) catch |err| {
                         this.err = err;
                         return;
                     };
-                    defer child_dir.close();
+                    defer target_dir.close();
 
-                    var iter = child_dir.iterate();
+                    const abs_dest_dir_end = abs_dest_buf_remain;
 
-                    const basedir_path = bun.getFdPath(child_dir.fd, &target_buf) catch |err| {
-                        this.err = err;
-                        return;
-                    };
-                    target_buf[basedir_path.len] = std.fs.path.sep;
-                    var target_buf_remain = target_buf[basedir_path.len + 1 ..];
-                    const prev_target_buf_remain = target_buf_remain;
-
-                    while (iter.next() catch null) |entry_| {
-                        const entry: std.fs.Dir.Entry = entry_;
+                    var iter = target_dir.iterate();
+                    while (iter.next() catch null) |entry| {
                         switch (entry.kind) {
-                            std.fs.Dir.Entry.Kind.sym_link, std.fs.Dir.Entry.Kind.file => {
-                                target_buf_remain = prev_target_buf_remain;
-                                bun.copy(u8, target_buf_remain, entry.name);
-                                target_buf_remain = target_buf_remain[entry.name.len..];
-                                target_buf_remain[0] = 0;
-                                const to_path = if (!link_global)
-                                    std.fmt.bufPrintZ(&dest_buf, dot_bin ++ "{s}", .{entry.name}) catch continue
-                                else
-                                    std.fmt.bufPrintZ(&dest_buf, "{s}", .{entry.name}) catch continue;
+                            .sym_link, .file => {
+                                abs_dest_buf_remain = abs_dest_dir_end;
+                                @memcpy(abs_dest_buf_remain[0..entry.name.len], entry.name);
+                                abs_dest_buf_remain = abs_dest_buf_remain[entry.name.len..];
+                                abs_dest_buf_remain[0] = 0;
+                                const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
+                                const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                                std.os.unlinkatZ(
-                                    this.root_node_modules_folder.cast(),
-                                    to_path,
-                                    0,
-                                ) catch continue;
+                                unlinkBinOrShim(abs_dest);
                             },
                             else => {},
                         }

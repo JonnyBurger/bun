@@ -1,9 +1,9 @@
-import { ChildProcess, spawn, exec, fork } from "node:child_process";
+import { bunEnv, bunExe, isWindows } from "harness";
 import { createTest } from "node-harness";
+import { ChildProcess, exec, fork, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import util from "node:util";
-import { bunEnv, bunExe, isWindows } from "harness";
 const { beforeAll, beforeEach, afterAll, describe, expect, it, throws, assert, createCallCheckCtx, createDoneDotAll } =
   createTest(import.meta.path);
 const origProcessEnv = process.env;
@@ -187,14 +187,17 @@ describe("ChildProcess spawn bad stdio", () => {
       var __originalSpawn = ChildProcess.prototype.spawn;
       ChildProcess.prototype.spawn = function () {
         const err = __originalSpawn.apply(this, arguments);
-
         this.stdout.destroy();
         this.stderr.destroy();
 
         return err;
       };
 
-      let cmd = `${bunExe()} ${import.meta.dir}/spawned-child.js`;
+      let cmd =
+        target === "sleep"
+          ? // The process can exit before returning which breaks tests.
+            ((target = ""), `${bunExe()} -e "setTimeout(() => {}, 100)"`)
+          : `${bunExe()} ${path.join(import.meta.dir, "spawned-child.js")}`;
       if (target) cmd += " " + target;
       const child = exec(cmd, options, async (err, stdout, stderr) => {
         try {
@@ -230,11 +233,15 @@ describe("ChildProcess spawn bad stdio", () => {
   });
 
   it("should handle killed process", async () => {
-    await createChild({ timeout: 1 }, (err, stdout, stderr) => {
-      strictEqual(err.killed, true);
-      strictEqual(stdout, "");
-      strictEqual(stderr, "");
-    });
+    await createChild(
+      { timeout: 1 },
+      (err, stdout, stderr) => {
+        strictEqual(err.killed, true);
+        strictEqual(stdout, "");
+        strictEqual(stderr, "");
+      },
+      "sleep",
+    );
   });
 });
 
@@ -440,8 +447,6 @@ describe("child_process double pipe", () => {
       }),
     );
 
-    // TODO(Derrick): We don't implement the full API for this yet,
-    // So stdin has no 'drain' event.
     // TODO(@jasnell): This does not appear to ever be
     // emitted. It's not clear if it is necessary.
     fakeGrep.stdin.on("drain", () => {
@@ -644,14 +649,18 @@ describe("fork", () => {
     });
   });
   describe("args", () => {
-    it("Ensure that first argument `modulePath` must be provided and be of type string", () => {
-      const invalidModulePath = [0, true, undefined, null, [], {}, () => {}, Symbol("t")];
-      invalidModulePath.forEach(modulePath => {
-        expect(() => fork(modulePath, { env: bunEnv })).toThrow({
-          code: "ERR_INVALID_ARG_TYPE",
-          name: "TypeError",
-          message: `The "modulePath" argument must be of type string,Buffer,URL. Received ${modulePath?.toString()}`,
-        });
+    const invalidModulePath = [0, true, undefined, null, [], {}, () => {}, Symbol("t")];
+    invalidModulePath.forEach(modulePath => {
+      it(`Ensure that first argument \`modulePath\` must be provided and be of type string :: ${String(modulePath)}`, () => {
+        expect(() => fork(modulePath, { env: bunEnv })).toThrow(
+          expect.objectContaining({
+            code: "ERR_INVALID_ARG_TYPE",
+            name: "TypeError",
+            message: expect.stringContaining(
+              `The "modulePath" argument must be of type string, Buffer, or URL. Received `,
+            ),
+          }),
+        );
       });
     });
     // This test fails due to a DataCloneError or due to "Unable to deserialize data."
@@ -698,16 +707,18 @@ describe("fork", () => {
         });
       },
     );
-    it("Ensure that the third argument should be type of object if provided", () => {
-      const invalidThirdArgs = [0, true, () => {}, Symbol("t")];
-      invalidThirdArgs.forEach(arg => {
+    const invalidThirdArgs = [0, true, () => {}, Symbol("t")];
+    invalidThirdArgs.forEach(arg => {
+      it(`Ensure that the third argument should be type of object if provided :: ${String(arg)}`, () => {
         expect(() => {
           fork(fixtures.path("child-process-echo-options.js"), [], arg);
-        }).toThrow({
-          code: "ERR_INVALID_ARG_TYPE",
-          name: "TypeError",
-          message: `The \"options\" argument must be of type object. Received ${arg?.toString()}`,
-        });
+        }).toThrow(
+          expect.objectContaining({
+            code: "ERR_INVALID_ARG_TYPE",
+            name: "TypeError",
+            message: expect.stringContaining(`The "options" argument must be of type object. Received `),
+          }),
+        );
       });
     });
   });

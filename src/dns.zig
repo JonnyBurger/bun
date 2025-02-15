@@ -3,6 +3,10 @@ const std = @import("std");
 const JSC = bun.JSC;
 const JSValue = JSC.JSValue;
 
+pub const AI_V4MAPPED: c_int = if (bun.Environment.isWindows) 2048 else bun.C.translated.AI_V4MAPPED;
+pub const AI_ADDRCONFIG: c_int = if (bun.Environment.isWindows) 1024 else bun.C.translated.AI_ADDRCONFIG;
+pub const AI_ALL: c_int = if (bun.Environment.isWindows) 256 else bun.C.translated.AI_ALL;
+
 pub const GetAddrInfo = struct {
     name: []const u8 = "",
     port: u16 = 0,
@@ -23,7 +27,7 @@ pub const GetAddrInfo = struct {
         hints.ai_family = this.options.family.toLibC();
         hints.ai_socktype = this.options.socktype.toLibC();
         hints.ai_protocol = this.options.protocol.toLibC();
-        hints.ai_flags = this.options.flags;
+        hints.ai_flags = @bitCast(this.options.flags);
 
         return hints;
     }
@@ -42,13 +46,18 @@ pub const GetAddrInfo = struct {
 
     pub const Options = packed struct {
         family: Family = .unspecified,
-        socktype: SocketType = .unspecified,
+        /// Leaving this unset leads to many duplicate addresses returned.
+        /// Node hardcodes to `SOCK_STREAM`.
+        /// There don't seem to be any issues in Node's repo about this
+        /// So I think it's likely that nobody actually needs `SOCK_DGRAM` as a flag
+        /// https://github.com/nodejs/node/blob/2eff28fb7a93d3f672f80b582f664a7c701569fb/src/cares_wrap.cc#L1609
+        socktype: SocketType = .stream,
         protocol: Protocol = .unspecified,
         backend: Backend = Backend.default,
-        flags: i32 = 0,
+        flags: std.c.AI = .{},
 
         pub fn toLibC(this: Options) ?std.c.addrinfo {
-            if (this.family == .unspecified and this.socktype == .unspecified and this.protocol == .unspecified and this.flags == 0) {
+            if (this.family == .unspecified and this.socktype == .unspecified and this.protocol == .unspecified and this.flags == std.c.AI{}) {
                 return null;
             }
 
@@ -69,27 +78,30 @@ pub const GetAddrInfo = struct {
             if (value.isObject()) {
                 var options = Options{};
 
-                if (value.get(globalObject, "family")) |family| {
+                if (try value.get(globalObject, "family")) |family| {
                     options.family = try Family.fromJS(family, globalObject);
                 }
 
-                if (value.get(globalObject, "socketType") orelse value.get(globalObject, "socktype")) |socktype| {
+                if (try value.get(globalObject, "socketType") orelse try value.get(globalObject, "socktype")) |socktype| {
                     options.socktype = try SocketType.fromJS(socktype, globalObject);
                 }
 
-                if (value.get(globalObject, "protocol")) |protocol| {
+                if (try value.get(globalObject, "protocol")) |protocol| {
                     options.protocol = try Protocol.fromJS(protocol, globalObject);
                 }
 
-                if (value.get(globalObject, "backend")) |backend| {
+                if (try value.get(globalObject, "backend")) |backend| {
                     options.backend = try Backend.fromJS(backend, globalObject);
                 }
 
-                if (value.get(globalObject, "flags")) |flags| {
+                if (try value.get(globalObject, "flags")) |flags| {
                     if (!flags.isNumber())
                         return error.InvalidFlags;
 
-                    options.flags = flags.coerce(i32, globalObject);
+                    options.flags = flags.coerce(std.c.AI, globalObject);
+
+                    if (!options.flags.ALL and !options.flags.ADDRCONFIG and !options.flags.V4MAPPED)
+                        return error.InvalidFlags;
                 }
 
                 return options;
@@ -142,9 +154,9 @@ pub const GetAddrInfo = struct {
         pub fn toLibC(this: Family) i32 {
             return switch (this) {
                 .unspecified => 0,
-                .inet => std.os.AF.INET,
-                .inet6 => std.os.AF.INET6,
-                .unix => std.os.AF.UNIX,
+                .inet => std.posix.AF.INET,
+                .inet6 => std.posix.AF.INET6,
+                .unix => std.posix.AF.UNIX,
             };
         }
     };
@@ -164,14 +176,15 @@ pub const GetAddrInfo = struct {
         pub fn toLibC(this: SocketType) i32 {
             switch (this) {
                 .unspecified => return 0,
-                .stream => return std.os.SOCK.STREAM,
-                .dgram => return std.os.SOCK.DGRAM,
+                .stream => return std.posix.SOCK.STREAM,
+                .dgram => return std.posix.SOCK.DGRAM,
             }
         }
 
         pub fn fromJS(value: JSC.JSValue, globalObject: *JSC.JSGlobalObject) !SocketType {
             if (value.isEmptyOrUndefinedOrNull())
-                return .unspecified;
+                // Default to .stream
+                return .stream;
 
             if (value.isNumber()) {
                 return switch (value.to(i32)) {
@@ -234,8 +247,8 @@ pub const GetAddrInfo = struct {
         pub fn toLibC(this: Protocol) i32 {
             switch (this) {
                 .unspecified => return 0,
-                .tcp => return std.os.IPPROTO.TCP,
-                .udp => return std.os.IPPROTO.UDP,
+                .tcp => return std.posix.IPPROTO.TCP,
+                .udp => return std.posix.IPPROTO.UDP,
             }
         }
     };
@@ -340,10 +353,13 @@ pub const GetAddrInfo = struct {
 
         pub fn toJS(this: *const Result, globalThis: *JSC.JSGlobalObject) JSValue {
             const obj = JSC.JSValue.createEmptyObject(globalThis, 3);
-            obj.put(globalThis, JSC.ZigString.static("address"), addressToJS(&this.address, globalThis));
+            obj.put(globalThis, JSC.ZigString.static("address"), addressToJS(&this.address, globalThis) catch |err| return switch (err) {
+                error.JSError => .zero,
+                error.OutOfMemory => globalThis.throwOutOfMemoryValue(),
+            });
             obj.put(globalThis, JSC.ZigString.static("family"), switch (this.address.any.family) {
-                std.os.AF.INET => JSValue.jsNumber(4),
-                std.os.AF.INET6 => JSValue.jsNumber(6),
+                std.posix.AF.INET => JSValue.jsNumber(4),
+                std.posix.AF.INET6 => JSValue.jsNumber(6),
                 else => JSValue.jsNumber(0),
             });
             obj.put(globalThis, JSC.ZigString.static("ttl"), JSValue.jsNumber(this.ttl));
@@ -353,11 +369,9 @@ pub const GetAddrInfo = struct {
 };
 const String = bun.String;
 const default_allocator = bun.default_allocator;
-pub fn addressToString(
-    address: *const std.net.Address,
-) !bun.String {
+pub fn addressToString(address: *const std.net.Address) bun.OOM!bun.String {
     switch (address.any.family) {
-        std.os.AF.INET => {
+        std.posix.AF.INET => {
             var self = address.in;
             const bytes = @as(*const [4]u8, @ptrCast(&self.sa.addr));
             return String.createFormat("{}.{}.{}.{}", .{
@@ -367,7 +381,7 @@ pub fn addressToString(
                 bytes[3],
             });
         },
-        std.os.AF.INET6 => {
+        std.posix.AF.INET6 => {
             var stack = std.heap.stackFallback(512, default_allocator);
             const allocator = stack.get();
             var out = try std.fmt.allocPrint(allocator, "{any}", .{address.*});
@@ -377,7 +391,7 @@ pub fn addressToString(
             //              ^  ^^^^^^
             return String.createLatin1(out[1 .. out.len - 1 - std.fmt.count("{d}", .{address.in6.getPort()}) - 1]);
         },
-        std.os.AF.UNIX => {
+        std.posix.AF.UNIX => {
             if (comptime std.net.has_unix_sockets) {
                 return String.createLatin1(&address.un.path);
             }
@@ -388,16 +402,9 @@ pub fn addressToString(
     }
 }
 
-pub fn addressToJS(
-    address: *const std.net.Address,
-    globalThis: *JSC.JSGlobalObject,
-) JSC.JSValue {
-    const str = addressToString(address) catch {
-        globalThis.throwOutOfMemory();
-        return .zero;
-    };
-    defer str.deref();
-    return str.toJS(globalThis);
+pub fn addressToJS(address: *const std.net.Address, globalThis: *JSC.JSGlobalObject) bun.JSError!JSC.JSValue {
+    var str = addressToString(address) catch return globalThis.throwOutOfMemory();
+    return str.transferToJS(globalThis);
 }
 
 fn addrInfoCount(addrinfo: *std.c.addrinfo) u32 {
@@ -436,3 +443,5 @@ pub fn addrInfoToJSArray(
 
     return array;
 }
+
+pub const internal = bun.JSC.DNS.InternalDNS;

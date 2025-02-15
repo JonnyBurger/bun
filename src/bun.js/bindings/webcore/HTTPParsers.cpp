@@ -193,7 +193,7 @@ bool isValidLanguageHeaderValue(const String& value)
 }
 
 // See RFC 7230, Section 3.2.6.
-bool isValidHTTPToken(StringView value)
+bool isValidHTTPToken(const StringView value)
 {
     if (value.isEmpty())
         return false;
@@ -213,11 +213,6 @@ bool isValidHTTPToken(StringView value)
             return false;
     }
     return true;
-}
-
-bool isValidHTTPToken(const String& value)
-{
-    return isValidHTTPToken(StringView(value));
 }
 
 #if USE(GLIB)
@@ -340,7 +335,7 @@ static String trimInputSample(CharType* p, size_t length)
 
 std::optional<WallTime> parseHTTPDate(const String& value)
 {
-    double dateInMillisecondsSinceEpoch = parseDateFromNullTerminatedCharacters(value.utf8().data());
+    double dateInMillisecondsSinceEpoch = parseDate(value.utf8().span());
     if (!std::isfinite(dateInMillisecondsSinceEpoch))
         return std::nullopt;
     // This assumes system_clock epoch equals Unix epoch which is true for all implementations but unspecified.
@@ -741,13 +736,13 @@ size_t parseHTTPHeader(const uint8_t* start, size_t length, String& failureReaso
             if (name.isEmpty()) {
                 if (p + 1 < end && *(p + 1) == '\n')
                     return (p + 2) - start;
-                failureReason = makeString("CR doesn't follow LF in header name at ", trimInputSample(p, end - p));
+                failureReason = makeString("CR doesn't follow LF in header name at "_s, trimInputSample(p, end - p));
                 return 0;
             }
-            failureReason = makeString("Unexpected CR in header name at ", trimInputSample(name.data(), name.size()));
+            failureReason = makeString("Unexpected CR in header name at "_s, trimInputSample(name.data(), name.size()));
             return 0;
         case '\n':
-            failureReason = makeString("Unexpected LF in header name at ", trimInputSample(name.data(), name.size()));
+            failureReason = makeString("Unexpected LF in header name at "_s, trimInputSample(name.data(), name.size()));
             return 0;
         case ':':
             break;
@@ -756,7 +751,7 @@ size_t parseHTTPHeader(const uint8_t* start, size_t length, String& failureReaso
                 if (name.size() < 1)
                     failureReason = "Unexpected start character in header name"_s;
                 else
-                    failureReason = makeString("Unexpected character in header name at ", trimInputSample(name.data(), name.size()));
+                    failureReason = makeString("Unexpected character in header name at "_s, trimInputSample(name.data(), name.size()));
                 return 0;
             }
             name.append(*p);
@@ -784,7 +779,7 @@ size_t parseHTTPHeader(const uint8_t* start, size_t length, String& failureReaso
             break;
         case '\n':
             if (strict) {
-                failureReason = makeString("Unexpected LF in header value at ", trimInputSample(value.data(), value.size()));
+                failureReason = makeString("Unexpected LF in header value at "_s, trimInputSample(value.data(), value.size()));
                 return 0;
             }
             break;
@@ -797,7 +792,7 @@ size_t parseHTTPHeader(const uint8_t* start, size_t length, String& failureReaso
         }
     }
     if (p >= end || (strict && *p != '\n')) {
-        failureReason = makeString("CR doesn't follow LF after header value at ", trimInputSample(p, end - p));
+        failureReason = makeString("CR doesn't follow LF after header value at "_s, trimInputSample(p, end - p));
         return 0;
     }
     valueStr = String::fromUTF8({ value.data(), value.size() });
@@ -817,18 +812,18 @@ size_t parseHTTPRequestBody(const uint8_t* data, size_t length, Vector<uint8_t>&
 }
 
 // Implements <https://fetch.spec.whatwg.org/#forbidden-header-name>.
-bool isForbiddenHeaderName(const String& name)
+bool isForbiddenHeaderName(const StringView name)
 {
     return false;
 }
 
-bool isForbiddenHeader(const String& name, StringView value)
+bool isForbiddenHeader(const StringView name, StringView value)
 {
     return false;
 }
 
 // Implements <https://fetch.spec.whatwg.org/#no-cors-safelisted-request-header-name>.
-bool isNoCORSSafelistedRequestHeaderName(const String& name)
+bool isNoCORSSafelistedRequestHeaderName(const StringView name)
 {
     HTTPHeaderName headerName;
     if (findHTTPHeaderName(name, headerName)) {
@@ -846,27 +841,27 @@ bool isNoCORSSafelistedRequestHeaderName(const String& name)
 }
 
 // Implements <https://fetch.spec.whatwg.org/#privileged-no-cors-request-header-name>.
-bool isPriviledgedNoCORSRequestHeaderName(const String& name)
+bool isPriviledgedNoCORSRequestHeaderName(const StringView name)
 {
     return false;
     // return equalLettersIgnoringASCIICase(name, "range"_s);
 }
 
 // Implements <https://fetch.spec.whatwg.org/#forbidden-response-header-name>.
-bool isForbiddenResponseHeaderName(const String& name)
+bool isForbiddenResponseHeaderName(const StringView name)
 {
     return false;
     // return equalLettersIgnoringASCIICase(name, "set-cookie"_s) || equalLettersIgnoringASCIICase(name, "set-cookie2"_s);
 }
 
 // Implements <https://fetch.spec.whatwg.org/#forbidden-method>.
-bool isForbiddenMethod(StringView name)
+bool isForbiddenMethod(const StringView name)
 {
     // return equalLettersIgnoringASCIICase(name, "connect"_s) || equalLettersIgnoringASCIICase(name, "trace"_s) || equalLettersIgnoringASCIICase(name, "track"_s);
     return false;
 }
 
-bool isSimpleHeader(const String& name, const String& value)
+bool isSimpleHeader(const StringView name, const StringView value)
 {
     HTTPHeaderName headerName;
     return !findHTTPHeaderName(name, headerName);

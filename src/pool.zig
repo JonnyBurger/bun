@@ -1,4 +1,5 @@
 const std = @import("std");
+const bun = @import("root").bun;
 
 fn SinglyLinkedList(comptime T: type, comptime Parent: type) type {
     return struct {
@@ -157,7 +158,7 @@ pub fn ObjectPool(
 
         pub fn push(allocator: std.mem.Allocator, pooled: Type) void {
             if (comptime @import("./env.zig").allow_assert)
-                @import("root").bun.assert(!full());
+                bun.assert(!full());
 
             const new_node = allocator.create(LinkedList.Node) catch unreachable;
             new_node.* = LinkedList.Node{
@@ -209,7 +210,7 @@ pub fn ObjectPool(
         }
 
         pub fn releaseValue(value: *Type) void {
-            @fieldParentPtr(LinkedList.Node, "data", value).release();
+            @as(*LinkedList.Node, @fieldParentPtr("data", value)).release();
         }
 
         pub fn release(node: *LinkedList.Node) void {
@@ -231,6 +232,22 @@ pub fn ObjectPool(
 
             data().list = LinkedList{ .first = node };
             data().loaded = true;
+        }
+
+        pub fn deleteAll() void {
+            var dat = data();
+            if (!dat.loaded) {
+                return;
+            }
+            dat.loaded = false;
+            dat.count = 0;
+            var next = dat.list.first;
+            dat.list.first = null;
+            while (next) |node| {
+                next = node.next;
+                if (std.meta.hasFn(Type, "deinit")) node.data.deinit();
+                node.allocator.destroy(node);
+            }
         }
     };
 }

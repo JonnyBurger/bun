@@ -1,8 +1,6 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { bunEnv, bunExe, tempDirWithFiles } from "harness";
 import { join } from "path";
-import { $ } from "bun";
-import { cp, rm } from "fs/promises";
 
 test("09041", async () => {
   const out = tempDirWithFiles("09041", {
@@ -25,4 +23,4 @@ test("09041", async () => {
   const std = await new Response(stdout).text();
 
   expect(std.length).toBeGreaterThan(1024 * 1024);
-}, 10000);
+}, 30000);

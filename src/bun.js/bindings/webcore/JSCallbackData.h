@@ -103,21 +103,10 @@ public:
 
 private:
     class WeakOwner : public JSC::WeakHandleOwner {
-        bool isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown>, void* context, JSC::AbstractSlotVisitor&, const char**) override;
+        bool isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown>, void* context, JSC::AbstractSlotVisitor&, ASCIILiteral*) override;
     };
     WeakOwner m_weakOwner;
     JSC::Weak<JSC::JSObject> m_callback;
-};
-
-class DeleteCallbackDataTask : public EventLoopTask {
-public:
-    template<typename CallbackDataType>
-    explicit DeleteCallbackDataTask(CallbackDataType* data)
-        : EventLoopTask(EventLoopTask::CleanupTask, [data](ScriptExecutionContext&) mutable {
-            delete data;
-        })
-    {
-    }
 };
 
 } // namespace WebCore

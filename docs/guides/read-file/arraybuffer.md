@@ -13,11 +13,11 @@ const buffer = await file.arrayBuffer();
 
 ---
 
-The binary content in the `ArrayBuffer` can then be read as a typed array, such as `Uint8Array`.
+The binary content in the `ArrayBuffer` can then be read as a typed array, such as `Int8Array`. For `Uint8Array`, use [`.bytes()`](./uint8array).
 
 ```ts
 const buffer = await file.arrayBuffer();
-const bytes = new Uint8Array(buffer);
+const bytes = new Int8Array(buffer);
 
 bytes[0];
 bytes.length;
@@ -25,4 +25,4 @@ bytes.length;
 
 ---
 
-Refer to the [Typed arrays](/docs/api/binary-data#typedarray) docs for more information on working with typed arrays in Bun.
+Refer to the [Typed arrays](https://bun.sh/docs/api/binary-data#typedarray) docs for more information on working with typed arrays in Bun.

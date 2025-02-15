@@ -137,11 +137,16 @@ void Event::setCurrentTarget(EventTarget* currentTarget, std::optional<bool> isI
     m_currentTargetIsInShadowTree = false; // m_currentTargetIsInShadowTree = isInShadowTree ? *isInShadowTree : (is<Node>(currentTarget) && downcast<Node>(*currentTarget).isInShadowTree());
 }
 
-Vector<EventTarget*> Event::composedPath() const
+void Event::setEventPath(const EventPath& path)
 {
-    // if (!m_eventPath)
-    return Vector<EventTarget*>();
-    // return m_eventPath->computePathUnclosedToTarget(*m_currentTarget);
+    m_eventPath = &path;
+}
+
+Vector<Ref<EventTarget>> Event::composedPath() const
+{
+    if (!m_eventPath)
+        return Vector<Ref<EventTarget>>();
+    return m_eventPath->computePathUnclosedToTarget(*m_currentTarget);
 }
 
 void Event::setUnderlyingEvent(Event* underlyingEvent)
@@ -188,7 +193,7 @@ void Event::resetAfterDispatch()
 
 String Event::debugDescription() const
 {
-    return makeString(type(), " phase ", eventPhase(), bubbles() ? " bubbles " : " ", cancelable() ? "cancelable " : " ", "0x"_s, hex(reinterpret_cast<uintptr_t>(this), Lowercase));
+    return makeString(type(), " phase "_s, eventPhase(), bubbles() ? " bubbles "_s : " "_s, cancelable() ? "cancelable "_s : " "_s, "0x"_s, hex(reinterpret_cast<uintptr_t>(this), Lowercase));
 }
 
 TextStream& operator<<(TextStream& ts, const Event& event)

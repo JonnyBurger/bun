@@ -21,7 +21,7 @@ category: Category,
 pub const Map = bun.StringHashMap(MimeType);
 
 pub fn createHashTable(allocator: std.mem.Allocator) !Map {
-    @setCold(true);
+    @branchHint(.cold);
 
     const decls = comptime std.meta.declarations(all);
 
@@ -143,7 +143,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
 
                 if (allocated != null and allocator != null) allocated.?.* = true;
                 return MimeType{
-                    .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                    .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                     .category = .application,
                 };
             },
@@ -151,7 +151,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
                 if (strings.eqlComptimeIgnoreLen(category_, "font")) {
                     if (allocated != null and allocator != null) allocated.?.* = true;
                     return MimeType{
-                        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                         .category = .font,
                     };
                 }
@@ -175,7 +175,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
 
                     if (allocated != null and allocator != null) allocated.?.* = true;
                     return MimeType{
-                        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                         .category = .text,
                     };
                 }
@@ -184,7 +184,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
                 if (strings.eqlComptimeIgnoreLen(category_, "image")) {
                     if (allocated != null and allocator != null) allocated.?.* = true;
                     return MimeType{
-                        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                         .category = .image,
                     };
                 }
@@ -192,7 +192,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
                 if (strings.eqlComptimeIgnoreLen(category_, "audio")) {
                     if (allocated != null and allocator != null) allocated.?.* = true;
                     return MimeType{
-                        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                         .category = .audio,
                     };
                 }
@@ -200,7 +200,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
                 if (strings.eqlComptimeIgnoreLen(category_, "video")) {
                     if (allocated != null and allocator != null) allocated.?.* = true;
                     return MimeType{
-                        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+                        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
                         .category = .video,
                     };
                 }
@@ -211,7 +211,7 @@ pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) Mime
 
     if (allocated != null and allocator != null) allocated.?.* = true;
     return MimeType{
-        .value = if (allocator) |a| a.dupe(u8, str_) catch unreachable else str_,
+        .value = if (allocator) |a| a.dupe(u8, str_) catch bun.outOfMemory() else str_,
         .category = .other,
     };
 }
@@ -237,6 +237,11 @@ pub fn byExtension(ext: string) MimeType {
 
 pub fn byExtensionNoDefault(ext: string) ?MimeType {
     return extensions.get(ext);
+}
+
+pub fn detectFromPath(path: string) MimeType {
+    const ext = std.fs.path.extension(path);
+    return byExtension(ext);
 }
 
 // this is partially auto-generated
@@ -2534,7 +2539,9 @@ pub const all = struct {
 pub fn byName(name: []const u8) MimeType {
     return MimeType.init(name, null, null);
 }
-
+pub fn deinit(mimeType: MimeType, allocator: std.mem.Allocator) void {
+    allocator.free(mimeType.value);
+}
 pub const extensions = ComptimeStringMap(MimeType, .{
     .{ "123", all.@"application/vnd.lotus-1-2-3" },
     .{ "1km", all.@"application/vnd.1000minds.decision-model+xml" },

@@ -106,6 +106,57 @@ const ls = Bun.which("ls", {
 console.log(ls); // null
 ```
 
+You can think of this as a builtin alternative to the [`which`](https://www.npmjs.com/package/which) npm package.
+
+## `Bun.randomUUIDv7()`
+
+`Bun.randomUUIDv7()` returns a [UUID v7](https://www.ietf.org/archive/id/draft-peabody-dispatch-new-uuid-format-01.html#name-uuidv7-layout-and-bit-order), which is monotonic and suitable for sorting and databases.
+
+```ts
+import { randomUUIDv7 } from "bun";
+
+const id = randomUUIDv7();
+// => "0192ce11-26d5-7dc3-9305-1426de888c5a"
+```
+
+A UUID v7 is a 128-bit value that encodes the current timestamp, a random value, and a counter. The timestamp is encoded using the lowest 48 bits, and the random value and counter are encoded using the remaining bits.
+
+The `timestamp` parameter defaults to the current time in milliseconds. When the timestamp changes, the counter is reset to a pseudo-random integer wrapped to 4096. This counter is atomic and threadsafe, meaning that using `Bun.randomUUIDv7()` in many Workers within the same process running at the same timestamp will not have colliding counter values.
+
+The final 8 bytes of the UUID are a cryptographically secure random value. It uses the same random number generator used by `crypto.randomUUID()` (which comes from BoringSSL, which in turn comes from the platform-specific system random number generator usually provided by the underlying hardware).
+
+```ts
+namespace Bun {
+  function randomUUIDv7(
+    encoding?: "hex" | "base64" | "base64url" = "hex",
+    timestamp?: number = Date.now(),
+  ): string;
+  /**
+   * If you pass "buffer", you get a 16-byte buffer instead of a string.
+   */
+  function randomUUIDv7(
+    encoding: "buffer",
+    timestamp?: number = Date.now(),
+  ): Buffer;
+
+  // If you only pass a timestamp, you get a hex string
+  function randomUUIDv7(timestamp?: number = Date.now()): string;
+}
+```
+
+You can optionally set encoding to `"buffer"` to get a 16-byte buffer instead of a string. This can sometimes avoid string conversion overhead.
+
+```ts#buffer.ts
+const buffer = Bun.randomUUIDv7("buffer");
+```
+
+`base64` and `base64url` encodings are also supported when you want a slightly shorter string.
+
+```ts#base64.ts
+const base64 = Bun.randomUUIDv7("base64");
+const base64url = Bun.randomUUIDv7("base64url");
+```
+
 ## `Bun.peek()`
 
 `Bun.peek(prom: Promise)`
@@ -183,7 +234,7 @@ const currentFile = import.meta.url;
 Bun.openInEditor(currentFile);
 ```
 
-You can override this via the `debug.editor` setting in your [`bunfig.toml`](/docs/runtime/bunfig)
+You can override this via the `debug.editor` setting in your [`bunfig.toml`](https://bun.sh/docs/runtime/bunfig).
 
 ```toml-diff#bunfig.toml
 + [debug]
@@ -199,8 +250,6 @@ Bun.openInEditor(import.meta.url, {
   column: 5,
 });
 ```
-
-Bun.ArrayBufferSink;
 
 ## `Bun.deepEquals()`
 
@@ -251,11 +300,11 @@ Bun.deepEquals(new Foo(), { a: 1 }, true); // false
 
 Escapes the following characters from an input string:
 
-- `"` becomes `"&quot;"`
-- `&` becomes `"&amp;"`
-- `'` becomes `"&#x27;"`
-- `<` becomes `"&lt;"`
-- `>` becomes `"&gt;"`
+- `"` becomes `&quot;`
+- `&` becomes `&amp;`
+- `'` becomes `&#x27;`
+- `<` becomes `&lt;`
+- `>` becomes `&gt;`
 
 This function is optimized for large input. On an M1X, it processes 480 MB/s -
 20 GB/s, depending on how much data is being escaped and whether there is non-ascii
@@ -275,6 +324,7 @@ Bun.stringWidth("\u001b[31mhello\u001b[0m", { countAnsiEscapeCodes: true }); // 
 ```
 
 This is useful for:
+
 - Aligning text in a terminal
 - Quickly checking if a string contains ANSI escape codes
 - Measuring the width of a string in a terminal
@@ -372,7 +422,6 @@ npm/string-width 95,000 chars ansi+emoji+ascii     3.68 s/iter        (3.66 s �
 
 {% /details %}
 
-
 TypeScript definition:
 
 ```ts
@@ -399,7 +448,6 @@ namespace Bun {
   ): number;
 }
 ```
-
 
 <!-- ## `Bun.enableANSIColors()` -->
 
@@ -583,6 +631,65 @@ const foo = new Foo();
 console.log(foo); // => "foo"
 ```
 
+## `Bun.inspect.table(tabularData, properties, options)`
+
+Format tabular data into a string. Like [`console.table`](https://developer.mozilla.org/en-US/docs/Web/API/console/table_static), except it returns a string rather than printing to the console.
+
+```ts
+console.log(
+  Bun.inspect.table([
+    { a: 1, b: 2, c: 3 },
+    { a: 4, b: 5, c: 6 },
+    { a: 7, b: 8, c: 9 },
+  ]),
+);
+//
+// ┌───┬───┬───┬───┐
+// │   │ a │ b │ c │
+// ├───┼───┼───┼───┤
+// │ 0 │ 1 │ 2 │ 3 │
+// │ 1 │ 4 │ 5 │ 6 │
+// │ 2 │ 7 │ 8 │ 9 │
+// └───┴───┴───┴───┘
+```
+
+Additionally, you can pass an array of property names to display only a subset of properties.
+
+```ts
+console.log(
+  Bun.inspect.table(
+    [
+      { a: 1, b: 2, c: 3 },
+      { a: 4, b: 5, c: 6 },
+    ],
+    ["a", "c"],
+  ),
+);
+//
+// ┌───┬───┬───┐
+// │   │ a │ c │
+// ├───┼───┼───┤
+// │ 0 │ 1 │ 3 │
+// │ 1 │ 4 │ 6 │
+// └───┴───┴───┘
+```
+
+You can also conditionally enable ANSI colors by passing `{ colors: true }`.
+
+```ts
+console.log(
+  Bun.inspect.table(
+    [
+      { a: 1, b: 2, c: 3 },
+      { a: 4, b: 5, c: 6 },
+    ],
+    {
+      colors: true,
+    },
+  ),
+);
+```
+
 ## `Bun.nanoseconds()`
 
 Returns the number of nanoseconds since the current `bun` process started, as a `number`. Useful for high-precision timing and benchmarking.
@@ -602,6 +709,9 @@ stream; // => ReadableStream
 
 await Bun.readableStreamToArrayBuffer(stream);
 // => ArrayBuffer
+
+await Bun.readableStreamToBytes(stream);
+// => Uint8Array
 
 await Bun.readableStreamToBlob(stream);
 // => Blob
@@ -661,3 +771,28 @@ console.log(obj); // => { foo: "bar" }
 ```
 
 Internally, [`structuredClone`](https://developer.mozilla.org/en-US/docs/Web/API/structuredClone) and [`postMessage`](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage) serialize and deserialize the same way. This exposes the underlying [HTML Structured Clone Algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) to JavaScript as an ArrayBuffer.
+
+## `estimateShallowMemoryUsageOf` in `bun:jsc`
+
+The `estimateShallowMemoryUsageOf` function returns a best-effort estimate of the memory usage of an object in bytes, excluding the memory usage of properties or other objects it references. For accurate per-object memory usage, use `Bun.generateHeapSnapshot`.
+
+```js
+import { estimateShallowMemoryUsageOf } from "bun:jsc";
+
+const obj = { foo: "bar" };
+const usage = estimateShallowMemoryUsageOf(obj);
+console.log(usage); // => 16
+
+const buffer = Buffer.alloc(1024 * 1024);
+estimateShallowMemoryUsageOf(buffer);
+// => 1048624
+
+const req = new Request("https://bun.sh");
+estimateShallowMemoryUsageOf(req);
+// => 167
+
+const array = Array(1024).fill({ a: 1 });
+// Arrays are usually not stored contiguously in memory, so this will not return a useful value (which isn't a bug).
+estimateShallowMemoryUsageOf(array);
+// => 16
+```

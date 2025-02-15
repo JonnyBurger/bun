@@ -1,9 +1,9 @@
+import { file, pathToFileURL } from "bun";
+import { bunRun, bunRunAsScript, isWindows, tempDirWithFiles } from "harness";
 import fs, { FSWatcher } from "node:fs";
 import path from "path";
-import { tempDirWithFiles, bunRun, bunRunAsScript } from "harness";
-import { pathToFileURL } from "bun";
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 // Because macOS (and possibly other operating systems) can return a watcher
 // before it is actually watching, we need to repeat the operation to avoid
 // a race condition.
@@ -23,8 +23,6 @@ const testDir = tempDirWithFiles("watch", {
   "sym.txt": "hello",
   [encodingFileName]: "hello",
 });
-
-const isWindows = process.platform === "win32";
 
 describe("fs.watch", () => {
   test("non-persistent watcher should not block the event loop", done => {
@@ -64,6 +62,19 @@ describe("fs.watch", () => {
     }
   });
 
+  test("should work with relative dirs", done => {
+    try {
+      const myrelativedir = path.join(testDir, "myrelativedir");
+      try {
+        fs.mkdirSync(myrelativedir);
+      } catch {}
+      fs.writeFileSync(path.join(myrelativedir, "relative.txt"), "hello");
+      bunRunAsScript(testDir, path.join(import.meta.dir, "fixtures", "relative_dir.js"));
+      done();
+    } catch (e: any) {
+      done(e);
+    }
+  });
   test("add file/folder to folder", done => {
     let count = 0;
     const root = path.join(testDir, "add-directory");
@@ -97,6 +108,24 @@ describe("fs.watch", () => {
       fs.mkdirSync(path.join(root, "new-folder.txt"));
       fs.rmdirSync(path.join(root, "new-folder.txt"));
     });
+  });
+
+  test("custom signal", async () => {
+    const root = path.join(testDir, "custom-signal");
+    try {
+      fs.mkdirSync(root);
+    } catch {}
+    const controller = new AbortController();
+    const watcher = fs.watch(root, { recursive: true, signal: controller.signal });
+    let err: Error | undefined = undefined;
+    const fn = mock();
+    watcher.on("error", fn);
+    watcher.on("close", fn);
+    controller.abort(new Error("potato"));
+
+    await Bun.sleep(10);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(fn.mock.calls[0][0].message).toBe("potato");
   });
 
   test("add file/folder to subfolder", done => {
@@ -230,7 +259,7 @@ describe("fs.watch", () => {
     } catch (err: any) {
       expect(err).toBeInstanceOf(Error);
       expect(err.code).toBe("ENOENT");
-      expect(err.syscall).toBe("open");
+      expect(err.syscall).toBe("watch");
       done();
     }
   });
@@ -418,9 +447,10 @@ describe("fs.watch", () => {
       watcher.close();
       expect.unreachable();
     } catch (err: any) {
-      expect(err.message).toBe("Permission denied");
+      expect(err.message).toBe(`EACCES: permission denied, watch '${filepath}'`);
+      expect(err.path).toBe(filepath);
       expect(err.code).toBe("EACCES");
-      expect(err.syscall).toBe("open");
+      expect(err.syscall).toBe("watch");
     }
   });
 
@@ -434,9 +464,10 @@ describe("fs.watch", () => {
       watcher.close();
       expect.unreachable();
     } catch (err: any) {
-      expect(err.message).toBe("Permission denied");
+      expect(err.message).toBe(`EACCES: permission denied, watch '${filepath}'`);
+      expect(err.path).toBe(filepath);
       expect(err.code).toBe("EACCES");
-      expect(err.syscall).toBe("open");
+      expect(err.syscall).toBe("watch");
     }
   });
 });

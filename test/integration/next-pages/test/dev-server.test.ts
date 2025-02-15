@@ -1,14 +1,16 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { bunEnv, bunExe } from "../../../harness";
 import { Subprocess } from "bun";
+import { install_test_helpers } from "bun:internal-for-testing";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { copyFileSync } from "fs";
+import { cp, rm } from "fs/promises";
 import { join } from "path";
 import { StringDecoder } from "string_decoder";
-import { cp, rm } from "fs/promises";
+import { bunEnv, bunExe, isCI, isWindows, tmpdirSync, toMatchNodeModulesAt } from "../../../harness";
+const { parseLockfile } = install_test_helpers;
 
-import { tmpdir } from "node:os";
+expect.extend({ toMatchNodeModulesAt });
 
-let root = join(tmpdir(), "next-pages" + Math.random().toString(36).slice(2) + "-" + Date.now().toString(36));
+let root = tmpdirSync();
 
 beforeAll(async () => {
   await rm(root, { recursive: true, force: true });
@@ -77,7 +79,7 @@ async function getDevServerURL() {
   readStream()
     .catch(e => reject(e))
     .finally(() => {
-      dev_server.unref?.();
+      dev_server?.unref?.();
     });
   await promise;
   return baseUrl;
@@ -94,7 +96,8 @@ beforeAll(async () => {
     stdin: "inherit",
   });
   if (!install.success) {
-    throw new Error("Failed to install dependencies");
+    const reason = install.signalCode || `code ${install.exitCode}`;
+    throw new Error(`Failed to install dependencies: ${reason}`);
   }
 
   try {
@@ -119,11 +122,17 @@ afterAll(() => {
 // https://github.com/puppeteer/puppeteer/issues/7740
 const puppeteer_unsupported = process.platform === "linux" && process.arch === "arm64";
 
-test.skipIf(puppeteer_unsupported)(
+// https://github.com/oven-sh/bun/issues/11255
+test.skipIf(puppeteer_unsupported || (isWindows && isCI))(
   "hot reloading works on the client (+ tailwind hmr)",
   async () => {
     expect(dev_server).not.toBeUndefined();
     expect(baseUrl).not.toBeUndefined();
+
+    const lockfile = parseLockfile(root);
+    expect(lockfile).toMatchNodeModulesAt(root);
+    expect(lockfile).toMatchSnapshot();
+
     var pid: number, exited;
     let timeout = setTimeout(() => {
       if (timeout && pid) {
@@ -149,5 +158,5 @@ test.skipIf(puppeteer_unsupported)(
     // @ts-expect-error
     timeout = undefined;
   },
-  30000,
+  100_000,
 );

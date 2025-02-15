@@ -27,7 +27,6 @@
 #include "JSDOMConvertStrings.h"
 #include <JavaScriptCore/JSCInlines.h>
 
-
 namespace WebCore {
 using namespace JSC;
 
@@ -35,28 +34,28 @@ using namespace JSC;
 
 template<> CryptoAlgorithmParameters convertDictionary<CryptoAlgorithmParameters>(JSGlobalObject& lexicalGlobalObject, JSValue value)
 {
-    VM& vm = JSC::getVM(&lexicalGlobalObject);
+    auto& vm = JSC::getVM(&lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     bool isNullOrUndefined = value.isUndefinedOrNull();
     auto* object = isNullOrUndefined ? nullptr : value.getObject();
     if (UNLIKELY(!isNullOrUndefined && !object)) {
         throwTypeError(&lexicalGlobalObject, throwScope);
-        return { };
+        return {};
     }
-    CryptoAlgorithmParameters result;
+    CryptoAlgorithmParameters result = {};
     JSValue nameValue;
     if (isNullOrUndefined)
         nameValue = jsUndefined();
     else {
-        nameValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "name"_s));
-        RETURN_IF_EXCEPTION(throwScope, { });
+        nameValue = object->get(&lexicalGlobalObject, vm.propertyNames->name);
+        RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!nameValue.isUndefined()) {
         result.name = convert<IDLDOMString>(lexicalGlobalObject, nameValue);
-        RETURN_IF_EXCEPTION(throwScope, { });
+        RETURN_IF_EXCEPTION(throwScope, {});
     } else {
-        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "name", "CryptoAlgorithmParameters", "DOMString");
-        return { };
+        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "name"_s, "CryptoAlgorithmParameters"_s, "DOMString"_s);
+        return {};
     }
     return result;
 }

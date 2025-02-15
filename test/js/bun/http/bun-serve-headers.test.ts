@@ -1,8 +1,8 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 
 // https://github.com/oven-sh/bun/issues/9180
 test("weird headers", async () => {
-  const server = Bun.serve({
+  using server = Bun.serve({
     port: 0,
     development: false,
     fetch(req) {
@@ -17,7 +17,7 @@ test("weird headers", async () => {
     },
   });
 
-  try {
+  {
     for (let i = 0; i < 255; i++) {
       const headers = new Headers();
       const name = "X-" + String.fromCharCode(i);
@@ -32,7 +32,5 @@ test("weird headers", async () => {
       });
       expect(res.headers.get(name)).toBe("1");
     }
-  } finally {
-    server.stop(true);
   }
 });

@@ -1,6 +1,6 @@
-import { bench, group, run } from "./runner.mjs";
-import { renderToReadableStream } from "react-dom/server.browser";
 import { renderToReadableStream as renderToReadableStreamBun } from "react-dom/server";
+import { renderToReadableStream } from "react-dom/server.browser";
+import { bench, group, run } from "../runner.mjs";
 
 const App = () => (
   <div>
@@ -24,6 +24,11 @@ group("new Response(stream).arrayBuffer()", () => {
     async () => await new Response(await renderToReadableStream(<App />)).arrayBuffer(),
   );
   bench("react-dom/server.bun", async () => await new Response(await renderToReadableStreamBun(<App />)).arrayBuffer());
+});
+
+group("new Response(stream).bytes()", () => {
+  bench("react-dom/server.browser", async () => await new Response(await renderToReadableStream(<App />)).bytes());
+  bench("react-dom/server.bun", async () => await new Response(await renderToReadableStreamBun(<App />)).bytes());
 });
 
 group("new Response(stream).blob()", () => {

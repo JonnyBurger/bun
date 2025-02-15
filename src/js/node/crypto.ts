@@ -4,7 +4,8 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 const StreamModule = require("node:stream");
 const BufferModule = require("node:buffer");
 const StringDecoder = require("node:string_decoder").StringDecoder;
-
+const StringPrototypeToLowerCase = String.prototype.toLowerCase;
+const { CryptoHasher } = Bun;
 const {
   symmetricKeySize,
   asymmetricKeyDetails,
@@ -18,7 +19,138 @@ const {
   generateKeyPairSync,
   sign: nativeSign,
   verify: nativeVerify,
-} = $cpp("KeyObject.cpp", "createNodeCryptoBinding");
+  publicEncrypt,
+  privateDecrypt,
+  privateEncrypt,
+  publicDecrypt,
+  X509Certificate,
+} = $cpp("KeyObject.cpp", "createKeyObjectBinding");
+
+const {
+  statelessDH,
+  ecdhConvertKey,
+  getCurves,
+  certVerifySpkac,
+  certExportPublicKey,
+  certExportChallenge,
+  getCiphers,
+  _getCipherInfo,
+} = $cpp("NodeCrypto.cpp", "createNodeCryptoBinding");
+
+const { POINT_CONVERSION_COMPRESSED, POINT_CONVERSION_HYBRID, POINT_CONVERSION_UNCOMPRESSED } =
+  $processBindingConstants.crypto;
+
+const {
+  randomInt: _randomInt,
+  pbkdf2: pbkdf2_,
+  pbkdf2Sync: pbkdf2Sync_,
+} = $zig("node_crypto_binding.zig", "createNodeCryptoBindingZig");
+
+const { validateObject, validateString, validateInt32 } = require("internal/validators");
+
+function verifySpkac(spkac, encoding) {
+  return certVerifySpkac(getArrayBufferOrView(spkac, "spkac", encoding));
+}
+function exportPublicKey(spkac, encoding) {
+  return certExportPublicKey(getArrayBufferOrView(spkac, "spkac", encoding));
+}
+function exportChallenge(spkac, encoding) {
+  return certExportChallenge(getArrayBufferOrView(spkac, "spkac", encoding));
+}
+
+function Certificate(): void {
+  if (!(this instanceof Certificate)) {
+    return new Certificate();
+  }
+
+  this.verifySpkac = verifySpkac;
+  this.exportPublicKey = exportPublicKey;
+  this.exportChallenge = exportChallenge;
+}
+Certificate.prototype = {};
+Certificate.verifySpkac = verifySpkac;
+Certificate.exportPublicKey = exportPublicKey;
+Certificate.exportChallenge = exportChallenge;
+
+let bunAlgorithmMap: Map<string, string>;
+function normalizeAlgorithmName(alg: string) {
+  if (!bunAlgorithmMap) {
+    // This list should be kept roughly in sync with the ComptimeStringMap used
+    // in Bun.CryptoHasher
+    bunAlgorithmMap = new Map([
+      ["blake2b256", "blake2b256"],
+      ["blake2b512", "blake2b512"],
+
+      // this JS code expects rmd160
+      // so we for now normalize to that instead.
+      ["ripemd160", "rmd160"],
+      ["rmd160", "rmd160"],
+      ["md4", "md4"],
+      ["md5", "md5"],
+      ["sha1", "sha1"],
+      ["sha128", "sha1"],
+      ["sha224", "sha224"],
+      ["sha256", "sha256"],
+      ["sha384", "sha384"],
+      ["sha512", "sha512"],
+      ["sha-1", "sha1"],
+      ["sha-224", "sha224"],
+      ["sha-256", "sha256"],
+      ["sha-384", "sha384"],
+      ["sha-512", "sha512"],
+      ["sha-512/224", "sha512-224"],
+      ["sha-512_224", "sha512-224"],
+      ["sha-512224", "sha512-224"],
+      ["sha512-224", "sha512-224"],
+      ["sha-512/256", "sha512-256"],
+      ["sha-512_256", "sha512-256"],
+      ["sha-512256", "sha512-256"],
+      ["sha512-256", "sha512-256"],
+      ["sha384", "sha384"],
+      ["sha3-224", "sha3-224"],
+      ["sha3-256", "sha3-256"],
+      ["sha3-384", "sha3-384"],
+      ["sha3-512", "sha3-512"],
+      ["shake128", "shake128"],
+      ["shake256", "shake256"],
+    ]);
+  }
+
+  return bunAlgorithmMap.get((alg = alg?.toLowerCase?.())) || alg;
+}
+
+function getCipherInfo(nameOrNid, options) {
+  if (typeof nameOrNid !== "string" && typeof nameOrNid !== "number") {
+    throw $ERR_INVALID_ARG_TYPE("nameOrNid", ["string", "number"], nameOrNid);
+  }
+  if (typeof nameOrNid === "number") validateInt32(nameOrNid, "nameOrNid");
+  let keyLength, ivLength;
+  if (options !== undefined) {
+    validateObject(options, "options");
+    ({ keyLength, ivLength } = options);
+    if (keyLength !== undefined) validateInt32(keyLength, "options.keyLength");
+    if (ivLength !== undefined) validateInt32(ivLength, "options.ivLength");
+  }
+
+  const ret = _getCipherInfo({}, nameOrNid, keyLength, ivLength);
+  if (ret !== undefined) {
+    ret.name &&= ret.name;
+    ret.type &&= StringPrototypeToLowerCase.$call(ret.type);
+  }
+  return ret;
+}
+
+function randomInt(min, max, callback) {
+  if (max == null) {
+    max = min;
+    min = 0;
+  }
+  if (callback != null) {
+    process.nextTick(() => callback(null, _randomInt(min, max)));
+    return;
+  }
+  return _randomInt(min, max);
+}
 
 const MAX_STRING_LENGTH = 536870888;
 var Buffer = globalThis.Buffer;
@@ -1172,7 +1304,7 @@ var require_browser2 = __commonJS({
     // does not become a node stream unless you create it into one
     const LazyHash = function Hash(algorithm, options) {
       this._options = options;
-      this._hasher = new CryptoHasher(algorithm, options);
+      this._hasher = new CryptoHasher(algorithm);
       this._finalized = false;
     };
     LazyHash.prototype = Object.create(StreamModule.Transform.prototype);
@@ -1181,7 +1313,7 @@ var require_browser2 = __commonJS({
       this._hasher.update(data, encoding);
       return this;
     };
-    LazyHash.prototype.digest = function update(data, encoding) {
+    LazyHash.prototype.digest = function digest(data, encoding) {
       this._checkFinalized();
       this._finalized = true;
       return this._hasher.digest(data, encoding);
@@ -1312,8 +1444,8 @@ var require_browser2 = __commonJS({
       });
     }
 
-    module.exports = function createHash(algorithm) {
-      return new LazyHash(algorithm);
+    module.exports = function createHash(algorithm, options) {
+      return new LazyHash(algorithm, options);
     };
 
     module.exports.createHash = module.exports;
@@ -1386,6 +1518,7 @@ var require_browser3 = __commonJS({
     var sha = require_sha2();
     var ZEROS = Buffer2.alloc(128);
     function Hmac(alg, key) {
+      alg = normalizeAlgorithmName(alg);
       key = exportIfKeyObject(key);
 
       Base.$call(this, "digest"), typeof key == "string" && (key = Buffer2.from(key));
@@ -1597,258 +1730,27 @@ var require_algos = __commonJS({
     module.exports = require_algorithms();
   },
 });
+function pbkdf2(password, salt, iterations, keylen, digest, callback) {
+  if (typeof digest === "function") {
+    callback = digest;
+    digest = undefined;
+  }
 
-// node_modules/pbkdf2/lib/precondition.js
-var require_precondition = __commonJS({
-  "node_modules/pbkdf2/lib/precondition.js"(exports, module) {
-    var MAX_ALLOC = Math.pow(2, 30) - 1;
-    module.exports = function (iterations, keylen) {
-      if (typeof iterations != "number") throw new TypeError("Iterations not a number");
-      if (iterations < 0) throw new TypeError("Bad iterations");
-      if (typeof keylen != "number") throw new TypeError("Key length not a number");
-      if (keylen < 0 || keylen > MAX_ALLOC || keylen !== keylen) throw new TypeError("Bad key length");
-    };
-  },
-});
+  const promise = pbkdf2_(password, salt, iterations, keylen, digest, callback);
+  if (callback) {
+    promise.then(
+      result => callback(null, result),
+      err => callback(err),
+    );
+    return;
+  }
 
-// node_modules/pbkdf2/lib/default-encoding.js
-var require_default_encoding = __commonJS({
-  "node_modules/pbkdf2/lib/default-encoding.js"(exports, module) {
-    var defaultEncoding;
-    global.process && global.process.browser
-      ? (defaultEncoding = "utf-8")
-      : global.process && global.process.version
-        ? ((pVersionMajor = parseInt(process.version.split(".")[0].slice(1), 10)),
-          (defaultEncoding = pVersionMajor >= 6 ? "utf-8" : "binary"))
-        : (defaultEncoding = "utf-8");
-    var pVersionMajor;
-    module.exports = defaultEncoding;
-  },
-});
+  promise.then(() => {});
+}
 
-// node_modules/pbkdf2/lib/to-buffer.js
-var require_to_buffer = __commonJS({
-  "node_modules/pbkdf2/lib/to-buffer.js"(exports, module) {
-    var Buffer2 = require_safe_buffer().Buffer;
-    module.exports = function (thing, encoding, name) {
-      if (Buffer2.isBuffer(thing)) return thing;
-      if (typeof thing == "string") return Buffer2.from(thing, encoding);
-      if (ArrayBuffer.isView(thing)) return Buffer2.from(thing.buffer);
-      throw new TypeError(name + " must be a string, a Buffer, a typed array or a DataView");
-    };
-  },
-});
-
-// node_modules/pbkdf2/lib/sync-browser.js
-var require_sync_browser = __commonJS({
-  "node_modules/pbkdf2/lib/sync-browser.js"(exports, module) {
-    var md5 = require_md52(),
-      RIPEMD160 = require_ripemd160(),
-      sha = require_sha2(),
-      Buffer2 = require_safe_buffer().Buffer,
-      checkParameters = require_precondition(),
-      defaultEncoding = require_default_encoding(),
-      toBuffer = require_to_buffer(),
-      ZEROS = Buffer2.alloc(128),
-      sizes = {
-        md5: 16,
-        sha1: 20,
-        sha224: 28,
-        sha256: 32,
-        sha384: 48,
-        sha512: 64,
-        rmd160: 20,
-        ripemd160: 20,
-      };
-    function Hmac(alg, key, saltLen) {
-      key = exportIfKeyObject(key);
-      var hash = getDigest(alg),
-        blocksize = alg === "sha512" || alg === "sha384" ? 128 : 64;
-      key.length > blocksize
-        ? (key = hash(key))
-        : key.length < blocksize && (key = Buffer2.concat([key, ZEROS], blocksize));
-      for (
-        var ipad = Buffer2.allocUnsafe(blocksize + sizes[alg]),
-          opad = Buffer2.allocUnsafe(blocksize + sizes[alg]),
-          i = 0;
-        i < blocksize;
-        i++
-      )
-        (ipad[i] = key[i] ^ 54), (opad[i] = key[i] ^ 92);
-      var ipad1 = Buffer2.allocUnsafe(blocksize + saltLen + 4);
-      ipad.copy(ipad1, 0, 0, blocksize),
-        (this.ipad1 = ipad1),
-        (this.ipad2 = ipad),
-        (this.opad = opad),
-        (this.alg = alg),
-        (this.blocksize = blocksize),
-        (this.hash = hash),
-        (this.size = sizes[alg]);
-    }
-    Hmac.prototype = {};
-    Hmac.prototype.run = function (data, ipad) {
-      data.copy(ipad, this.blocksize);
-      var h = this.hash(ipad);
-      return h.copy(this.opad, this.blocksize), this.hash(this.opad);
-    };
-    function getDigest(alg) {
-      function shaFunc(data) {
-        return sha(alg).update(data).digest();
-      }
-      function rmd160Func(data) {
-        return new RIPEMD160().update(data).digest();
-      }
-      return alg === "rmd160" || alg === "ripemd160" ? rmd160Func : alg === "md5" ? md5 : shaFunc;
-    }
-    function pbkdf2(password, salt, iterations, keylen, digest) {
-      checkParameters(iterations, keylen),
-        (password = toBuffer(password, defaultEncoding, "Password")),
-        (salt = toBuffer(salt, defaultEncoding, "Salt")),
-        (digest = digest || "sha1");
-      var hmac = new Hmac(digest, password, salt.length),
-        DK = Buffer2.allocUnsafe(keylen),
-        block1 = Buffer2.allocUnsafe(salt.length + 4);
-      salt.copy(block1, 0, 0, salt.length);
-      for (var destPos = 0, hLen = sizes[digest], l = Math.ceil(keylen / hLen), i = 1; i <= l; i++) {
-        block1.writeUInt32BE(i, salt.length);
-        for (var T = hmac.run(block1, hmac.ipad1), U = T, j = 1; j < iterations; j++) {
-          U = hmac.run(U, hmac.ipad2);
-          for (var k = 0; k < hLen; k++) T[k] ^= U[k];
-        }
-        T.copy(DK, destPos), (destPos += hLen);
-      }
-      return DK;
-    }
-    module.exports = pbkdf2;
-  },
-});
-
-// node_modules/pbkdf2/lib/async.js
-var require_async = __commonJS({
-  "node_modules/pbkdf2/lib/async.js"(exports, module) {
-    var Buffer2 = require_safe_buffer().Buffer,
-      checkParameters = require_precondition(),
-      defaultEncoding = require_default_encoding(),
-      sync = require_sync_browser(),
-      toBuffer = require_to_buffer(),
-      ZERO_BUF,
-      subtle = globalCrypto.subtle,
-      toBrowser = {
-        sha: "SHA-1",
-        "sha-1": "SHA-1",
-        sha1: "SHA-1",
-        sha256: "SHA-256",
-        "sha-256": "SHA-256",
-        sha384: "SHA-384",
-        "sha-384": "SHA-384",
-        "sha-512": "SHA-512",
-        sha512: "SHA-512",
-      },
-      checks = [];
-    function checkNative(algo) {
-      if ((global.process && !global.process.browser) || !subtle || !subtle.importKey || !subtle.deriveBits)
-        return Promise.resolve(!1);
-      if (checks[algo] !== void 0) return checks[algo];
-      ZERO_BUF = ZERO_BUF || Buffer2.alloc(8);
-      var prom = browserPbkdf2(ZERO_BUF, ZERO_BUF, 10, 128, algo)
-        .then(function () {
-          return !0;
-        })
-        .catch(function () {
-          return !1;
-        });
-      return (checks[algo] = prom), prom;
-    }
-    var nextTick;
-    function getNextTick() {
-      return (
-        nextTick ||
-        (global.process && global.process.nextTick
-          ? (nextTick = global.process.nextTick)
-          : global.queueMicrotask
-            ? (nextTick = global.queueMicrotask)
-            : global.setImmediate
-              ? (nextTick = global.setImmediate)
-              : (nextTick = global.setTimeout),
-        nextTick)
-      );
-    }
-    function browserPbkdf2(password, salt, iterations, length, algo) {
-      return subtle
-        .importKey("raw", password, { name: "PBKDF2" }, !1, ["deriveBits"])
-        .then(function (key) {
-          return subtle.deriveBits(
-            {
-              name: "PBKDF2",
-              salt,
-              iterations,
-              hash: {
-                name: algo,
-              },
-            },
-            key,
-            length << 3,
-          );
-        })
-        .then(function (res) {
-          return Buffer2.from(res);
-        });
-    }
-    function resolvePromise(promise, callback) {
-      promise.then(
-        function (out) {
-          getNextTick()(function () {
-            callback(null, out);
-          });
-        },
-        function (e) {
-          getNextTick()(function () {
-            callback(e);
-          });
-        },
-      );
-    }
-    module.exports = function (password, salt, iterations, keylen, digest, callback) {
-      typeof digest == "function" && ((callback = digest), (digest = void 0)), (digest = digest || "sha1");
-      var algo = toBrowser[digest.toLowerCase()];
-      if (!algo || typeof global.Promise != "function") {
-        getNextTick()(function () {
-          var out;
-          try {
-            out = sync(password, salt, iterations, keylen, digest);
-          } catch (e) {
-            return callback(e);
-          }
-          callback(null, out);
-        });
-        return;
-      }
-      if (
-        (checkParameters(iterations, keylen),
-        (password = toBuffer(password, defaultEncoding, "Password")),
-        (salt = toBuffer(salt, defaultEncoding, "Salt")),
-        typeof callback != "function")
-      )
-        throw new Error("No callback provided to pbkdf2");
-      resolvePromise(
-        checkNative(algo).then(function (resp) {
-          return resp
-            ? browserPbkdf2(password, salt, iterations, keylen, algo)
-            : sync(password, salt, iterations, keylen, digest);
-        }),
-        callback,
-      );
-    };
-  },
-});
-
-// node_modules/pbkdf2/browser.js
-var require_browser4 = __commonJS({
-  "node_modules/pbkdf2/browser.js"(exports) {
-    exports.pbkdf2 = require_async();
-    exports.pbkdf2Sync = require_sync_browser();
-  },
-});
+function pbkdf2Sync(password, salt, iterations, keylen, digest) {
+  return pbkdf2Sync_(password, salt, iterations, keylen, digest);
+}
 
 // node_modules/des.js/lib/des/utils.js
 var require_utils = __commonJS({
@@ -3295,11 +3197,7 @@ var require_decrypter = __commonJS({
 var require_browser5 = __commonJS({
   "node_modules/browserify-aes/browser.js"(exports) {
     var ciphers = require_encrypter(),
-      deciphers = require_decrypter(),
-      modes = require_list();
-    function getCiphers() {
-      return Object.keys(modes);
-    }
+      deciphers = require_decrypter();
     exports.createCipher = exports.Cipher = ciphers.createCipher;
     exports.createCipheriv = exports.Cipheriv = ciphers.createCipheriv;
     exports.createDecipher = exports.Decipher = deciphers.createDecipher;
@@ -3373,9 +3271,6 @@ var require_browser6 = __commonJS({
       if (((suite = suite.toLowerCase()), aesModes[suite])) return aes.createDecipheriv(suite, key, iv);
       if (desModes[suite]) return new DES({ key, iv, mode: suite, decrypt: !0 });
       throw new TypeError("invalid suite type");
-    }
-    function getCiphers() {
-      return Object.keys(desModes).concat(aes.getCiphers());
     }
     exports.createCipher = exports.Cipher = createCipher;
     exports.createCipheriv = exports.Cipheriv = createCipheriv;
@@ -5728,6 +5623,39 @@ var require_browser7 = __commonJS({
     }
     exports.DiffieHellmanGroup = exports.createDiffieHellmanGroup = exports.getDiffieHellman = getDiffieHellman;
     exports.createDiffieHellman = exports.DiffieHellman = createDiffieHellman;
+
+    exports.diffieHellman = function diffieHellman(options) {
+      validateObject(options);
+
+      const { privateKey, publicKey } = options;
+
+      if (!(privateKey instanceof KeyObject)) {
+        throw $ERR_INVALID_ARG_VALUE("options.privateKey", privateKey);
+      }
+
+      if (!(publicKey instanceof KeyObject)) {
+        throw $ERR_INVALID_ARG_VALUE("options.publicKey", publicKey);
+      }
+
+      if (privateKey.type !== "private") {
+        throw $ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(privateKey.type, "private");
+      }
+
+      const publicKeyType = publicKey.type;
+      if (publicKeyType !== "public" && publicKeyType !== "private") {
+        throw $ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(publicKeyType, "private or public");
+      }
+
+      const privateType = privateKey.asymmetricKeyType;
+      const publicType = publicKey.asymmetricKeyType;
+      if (privateType !== publicType || !["dh", "ec", "x448", "x25519"].includes(privateType)) {
+        throw $ERR_CRYPTO_INCOMPATIBLE_KEY(
+          `Incompatible key types for Diffie-Hellman: ${privateType} and ${publicType}`,
+        );
+      }
+
+      return statelessDH(privateKey.$bunNativePtr, publicKey.$bunNativePtr);
+    };
   },
 });
 
@@ -6110,7 +6038,7 @@ var require_base = __commonJS({
         return res;
       } else if ((bytes[0] === 2 || bytes[0] === 3) && bytes.length - 1 === len)
         return this.pointFromX(bytes.slice(1, 1 + len), bytes[0] === 3);
-      throw new Error("Unknown point format");
+      throw $ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY("Public key is not valid for specified curve");
     };
     BasePoint.prototype.encodeCompressed = function (enc) {
       return this.encode(enc, !0);
@@ -9128,8 +9056,7 @@ var require_signature = __commonJS({
     function Signature(options, enc) {
       if (options instanceof Signature) return options;
       this._importDER(options, enc) ||
-        (assert(options.r && options.s, "Signature without r or s"),
-        (this.r = new BN(options.r, 16)),
+        ((this.r = new BN(options.r, 16)),
         (this.s = new BN(options.s, 16)),
         options.recoveryParam === void 0 ? (this.recoveryParam = null) : (this.recoveryParam = options.recoveryParam));
     }
@@ -9426,7 +9353,7 @@ var require_signature2 = __commonJS({
             R: sig.slice(0, eddsa.encodingLength),
             S: sig.slice(eddsa.encodingLength),
           }),
-        assert(sig.R && sig.S, "Signature without R or S"),
+        // assert(sig.R && sig.S, "Signature without R or S"),
         eddsa.isPoint(sig.R) && (this._R = sig.R),
         sig.S instanceof BN && (this._S = sig.S),
         (this._Rencoded = Array.isArray(sig.R) ? sig.R : sig.Rencoded),
@@ -11118,7 +11045,6 @@ var require_parse_asn1 = __commonJS({
       aesid = require_aesid(),
       fixProc = require_fixProc(),
       ciphers = require_browser5(),
-      compat = require_browser4(),
       Buffer2 = require_safe_buffer().Buffer;
     module.exports = parseKeys;
     function parseKeys(buffer) {
@@ -11272,7 +11198,7 @@ var require_parse_asn1 = __commonJS({
         iv = data.algorithm.decrypt.cipher.iv,
         cipherText = data.subjectPrivateKey,
         keylen = parseInt(algo.split("-")[1], 10) / 8,
-        key = compat.pbkdf2Sync(password, salt, iters, keylen, "sha1"),
+        key = pbkdf2Sync(password, salt, iters, keylen, "sha1"),
         cipher = ciphers.createDecipheriv(algo, key, iv),
         out = [];
       return out.push(cipher.update(cipherText)), out.push(cipher.final()), Buffer2.concat(out);
@@ -11570,9 +11496,6 @@ var require_browser9 = __commonJS({
   "node_modules/create-ecdh/browser.js"(exports, module) {
     var elliptic = require_elliptic(),
       BN = require_bn6();
-    module.exports = function (curve) {
-      return new ECDH(curve);
-    };
     var aliases = {
       secp256k1: {
         name: "secp256k1",
@@ -11646,6 +11569,29 @@ var require_browser9 = __commonJS({
       var _priv = new BN(priv);
       return (_priv = _priv.toString(16)), (this.keys = this.curve.genKeyPair()), this.keys._importPrivate(_priv), this;
     };
+    function getFormat(format) {
+      if (format) {
+        if (format === "compressed") return POINT_CONVERSION_COMPRESSED;
+        if (format === "hybrid") return POINT_CONVERSION_HYBRID;
+        if (format !== "uncompressed") throw $ERR_CRYPTO_ECDH_INVALID_FORMAT("Invalid ECDH format: " + format);
+      }
+      return POINT_CONVERSION_UNCOMPRESSED;
+    }
+    function encode(buffer, encoding) {
+      if (encoding && encoding !== "buffer") buffer = buffer.toString(encoding);
+      return buffer;
+    }
+    ECDH.convertKey = function convertKey(key, curve, inEnc, outEnc, format) {
+      validateString(curve, "curve");
+      key = getArrayBufferOrView(key, "key", inEnc);
+      const f = getFormat(format);
+      const convertedKey = ecdhConvertKey(key, curve, f);
+      return encode(convertedKey, outEnc);
+    };
+    module.exports.ECDH = ECDH;
+    module.exports.createECDH = function (curve) {
+      return new ECDH(curve);
+    };
     function formatReturnValue(bn, enc, len) {
       Array.isArray(bn) || (bn = bn.toArray());
       var buf = new Buffer(bn);
@@ -11655,193 +11601,6 @@ var require_browser9 = __commonJS({
       }
       return enc ? buf.toString(enc) : buf;
     }
-  },
-});
-
-// node_modules/public-encrypt/mgf.js
-var require_mgf = __commonJS({
-  "node_modules/public-encrypt/mgf.js"(exports, module) {
-    var createHash = require_browser2(),
-      Buffer2 = require_safe_buffer().Buffer;
-    module.exports = function (seed, len) {
-      for (var t = Buffer2.alloc(0), i = 0, c; t.length < len; )
-        (c = i2ops(i++)), (t = Buffer2.concat([t, createHash("sha1").update(seed).update(c).digest()]));
-      return t.slice(0, len);
-    };
-    function i2ops(c) {
-      var out = Buffer2.allocUnsafe(4);
-      return out.writeUInt32BE(c, 0), out;
-    }
-  },
-});
-
-// node_modules/public-encrypt/xor.js
-var require_xor = __commonJS({
-  "node_modules/public-encrypt/xor.js"(exports, module) {
-    module.exports = function (a, b) {
-      for (var len = a.length, i = -1; ++i < len; ) a[i] ^= b[i];
-      return a;
-    };
-  },
-});
-
-// node_modules/public-encrypt/node_modules/bn.js/lib/bn.js
-var require_bn7 = require_bn;
-
-const { CryptoHasher } = globalThis.Bun;
-
-// node_modules/public-encrypt/withPublic.js
-var require_withPublic = __commonJS({
-  "node_modules/public-encrypt/withPublic.js"(exports, module) {
-    var BN = require_bn7(),
-      Buffer2 = require_safe_buffer().Buffer;
-    function withPublic(paddedMsg, key) {
-      return Buffer2.from(paddedMsg.toRed(BN.mont(key.modulus)).redPow(new BN(key.publicExponent)).fromRed().toArray());
-    }
-    module.exports = withPublic;
-  },
-});
-
-// node_modules/public-encrypt/publicEncrypt.js
-var require_publicEncrypt = __commonJS({
-  "node_modules/public-encrypt/publicEncrypt.js"(exports, module) {
-    var parseKeys = require_parse_asn1(),
-      randomBytes = require_browser(),
-      createHash = require_browser2(),
-      mgf = require_mgf(),
-      xor = require_xor(),
-      BN = require_bn7(),
-      withPublic = require_withPublic(),
-      crt = require_browserify_rsa(),
-      Buffer2 = require_safe_buffer().Buffer;
-    module.exports = function (publicKey, msg, reverse) {
-      var padding;
-      publicKey.padding ? (padding = publicKey.padding) : reverse ? (padding = 1) : (padding = 4);
-      var key = parseKeys(publicKey),
-        paddedMsg;
-      if (padding === 4) paddedMsg = oaep(key, msg);
-      else if (padding === 1) paddedMsg = pkcs1(key, msg, reverse);
-      else if (padding === 3) {
-        if (((paddedMsg = new BN(msg)), paddedMsg.cmp(key.modulus) >= 0)) throw new Error("data too long for modulus");
-      } else throw new Error("unknown padding");
-      return reverse ? crt(paddedMsg, key) : withPublic(paddedMsg, key);
-    };
-    function oaep(key, msg) {
-      var k = key.modulus.byteLength(),
-        mLen = msg.length,
-        iHash = createHash("sha1").update(Buffer2.alloc(0)).digest(),
-        hLen = iHash.length,
-        hLen2 = 2 * hLen;
-      if (mLen > k - hLen2 - 2) throw new Error("message too long");
-      var ps = Buffer2.alloc(k - mLen - hLen2 - 2),
-        dblen = k - hLen - 1,
-        seed = randomBytes(hLen),
-        maskedDb = xor(Buffer2.concat([iHash, ps, Buffer2.alloc(1, 1), msg], dblen), mgf(seed, dblen)),
-        maskedSeed = xor(seed, mgf(maskedDb, hLen));
-      return new BN(Buffer2.concat([Buffer2.alloc(1), maskedSeed, maskedDb], k));
-    }
-    function pkcs1(key, msg, reverse) {
-      var mLen = msg.length,
-        k = key.modulus.byteLength();
-      if (mLen > k - 11) throw new Error("message too long");
-      var ps;
-      return (
-        reverse ? (ps = Buffer2.alloc(k - mLen - 3, 255)) : (ps = nonZero(k - mLen - 3)),
-        new BN(Buffer2.concat([Buffer2.from([0, reverse ? 1 : 2]), ps, Buffer2.alloc(1), msg], k))
-      );
-    }
-    function nonZero(len) {
-      for (var out = Buffer2.allocUnsafe(len), i = 0, cache = randomBytes(len * 2), cur = 0, num; i < len; )
-        cur === cache.length && ((cache = randomBytes(len * 2)), (cur = 0)),
-          (num = cache[cur++]),
-          num && (out[i++] = num);
-      return out;
-    }
-  },
-});
-
-// node_modules/public-encrypt/privateDecrypt.js
-var require_privateDecrypt = __commonJS({
-  "node_modules/public-encrypt/privateDecrypt.js"(exports, module) {
-    var parseKeys = require_parse_asn1(),
-      mgf = require_mgf(),
-      xor = require_xor(),
-      BN = require_bn7(),
-      crt = require_browserify_rsa(),
-      createHash = require_browser2(),
-      withPublic = require_withPublic(),
-      Buffer2 = require_safe_buffer().Buffer;
-    module.exports = function (privateKey, enc, reverse) {
-      var padding;
-      privateKey.padding ? (padding = privateKey.padding) : reverse ? (padding = 1) : (padding = 4);
-      var key = parseKeys(privateKey),
-        k = key.modulus.byteLength();
-      if (enc.length > k || new BN(enc).cmp(key.modulus) >= 0) throw new Error("decryption error");
-      var msg;
-      reverse ? (msg = withPublic(new BN(enc), key)) : (msg = crt(enc, key));
-      var zBuffer = Buffer2.alloc(k - msg.length);
-      if (((msg = Buffer2.concat([zBuffer, msg], k)), padding === 4)) return oaep(key, msg);
-      if (padding === 1) return pkcs1(key, msg, reverse);
-      if (padding === 3) return msg;
-      throw new Error("unknown padding");
-    };
-    function oaep(key, msg) {
-      var k = key.modulus.byteLength(),
-        iHash = createHash("sha1").update(Buffer2.alloc(0)).digest(),
-        hLen = iHash.length;
-      if (msg[0] !== 0) throw new Error("decryption error");
-      var maskedSeed = msg.slice(1, hLen + 1),
-        maskedDb = msg.slice(hLen + 1),
-        seed = xor(maskedSeed, mgf(maskedDb, hLen)),
-        db = xor(maskedDb, mgf(seed, k - hLen - 1));
-      if (compare(iHash, db.slice(0, hLen))) throw new Error("decryption error");
-      for (var i = hLen; db[i] === 0; ) i++;
-      if (db[i++] !== 1) throw new Error("decryption error");
-      return db.slice(i);
-    }
-    function pkcs1(key, msg, reverse) {
-      for (var p1 = msg.slice(0, 2), i = 2, status = 0; msg[i++] !== 0; )
-        if (i >= msg.length) {
-          status++;
-          break;
-        }
-      var ps = msg.slice(2, i - 1);
-      if (
-        (((p1.toString("hex") !== "0002" && !reverse) || (p1.toString("hex") !== "0001" && reverse)) && status++,
-        ps.length < 8 && status++,
-        status)
-      )
-        throw new Error("decryption error");
-      return msg.slice(i);
-    }
-    function compare(a, b) {
-      (a = Buffer2.from(a)), (b = Buffer2.from(b));
-      var dif = 0,
-        len = a.length;
-      a.length !== b.length && (dif++, (len = Math.min(a.length, b.length)));
-      for (var i = -1; ++i < len; ) dif += a[i] ^ b[i];
-      return dif;
-    }
-  },
-});
-
-// node_modules/public-encrypt/browser.js
-var require_browser10 = __commonJS({
-  "node_modules/public-encrypt/browser.js"(exports) {
-    var publicEncrypt = require_publicEncrypt();
-    exports.publicEncrypt = function (key, buf, options) {
-      return publicEncrypt(getKeyFrom(key, "public"), buf, options);
-    };
-    var privateDecrypt = require_privateDecrypt();
-    exports.privateDecrypt = function (key, buf, options) {
-      return privateDecrypt(getKeyFrom(key, "private"), buf, options);
-    };
-    exports.privateEncrypt = function (key, buf) {
-      return publicEncrypt(getKeyFrom(key, "private"), buf, !0);
-    };
-    exports.publicDecrypt = function (key, buf) {
-      return privateDecrypt(getKeyFrom(key, "public"), buf, !0);
-    };
   },
 });
 
@@ -11914,9 +11673,8 @@ var require_crypto_browserify2 = __commonJS({
     exports.getHashes = function () {
       return hashes;
     };
-    var p = require_browser4();
-    exports.pbkdf2 = p.pbkdf2;
-    exports.pbkdf2Sync = p.pbkdf2Sync;
+    exports.pbkdf2Sync = pbkdf2Sync;
+    exports.pbkdf2 = pbkdf2;
     var aes = require_browser6();
     exports.Cipher = aes.Cipher;
     exports.createCipher = aes.createCipher;
@@ -11926,7 +11684,7 @@ var require_crypto_browserify2 = __commonJS({
     exports.createDecipher = aes.createDecipher;
     exports.Decipheriv = aes.Decipheriv;
     exports.createDecipheriv = aes.createDecipheriv;
-    exports.getCiphers = aes.getCiphers;
+    exports.getCiphers = getCiphers;
     exports.listCiphers = aes.listCiphers;
     var dh = require_browser7();
     exports.DiffieHellmanGroup = dh.DiffieHellmanGroup;
@@ -11934,17 +11692,15 @@ var require_crypto_browserify2 = __commonJS({
     exports.getDiffieHellman = dh.getDiffieHellman;
     exports.createDiffieHellman = dh.createDiffieHellman;
     exports.DiffieHellman = dh.DiffieHellman;
+    exports.diffieHellman = dh.diffieHellman;
     var sign = require_browser8();
     exports.createSign = sign.createSign;
     exports.Sign = sign.Sign;
     exports.createVerify = sign.createVerify;
     exports.Verify = sign.Verify;
-    exports.createECDH = require_browser9();
-    var publicEncrypt = require_browser10();
-    exports.publicEncrypt = publicEncrypt.publicEncrypt;
-    exports.privateEncrypt = publicEncrypt.privateEncrypt;
-    exports.publicDecrypt = publicEncrypt.publicDecrypt;
-    exports.privateDecrypt = publicEncrypt.privateDecrypt;
+    const ecdh = require_browser9();
+    exports.ECDH = ecdh.ECDH;
+    exports.createECDH = ecdh.createECDH;
     exports.getRandomValues = values => crypto.getRandomValues(values);
     var rf = require_browser11();
     exports.randomFill = rf.randomFill;
@@ -11966,10 +11722,8 @@ var require_crypto_browserify2 = __commonJS({
 // crypto.js
 var crypto_exports = require_crypto_browserify2();
 
-var DEFAULT_ENCODING = "buffer",
-  getRandomValues = array => crypto.getRandomValues(array),
+var getRandomValues = array => crypto.getRandomValues(array),
   randomUUID = () => crypto.randomUUID(),
-  randomInt = (...args) => crypto.randomInt(...args),
   timingSafeEqual =
     "timingSafeEqual" in crypto
       ? (a, b) => {
@@ -11985,7 +11739,7 @@ var DEFAULT_ENCODING = "buffer",
     "scryptSync" in crypto
       ? (password, salt, keylen, options) => {
           let res = crypto.scryptSync(password, salt, keylen, options);
-          return DEFAULT_ENCODING !== "buffer" ? new Buffer(res).toString(DEFAULT_ENCODING) : new Buffer(res);
+          return new Buffer(res);
         }
       : void 0,
   scrypt =
@@ -11999,11 +11753,7 @@ var DEFAULT_ENCODING = "buffer",
           }
           try {
             let result = crypto.scryptSync(password, salt, keylen, options);
-            process.nextTick(
-              callback,
-              null,
-              DEFAULT_ENCODING !== "buffer" ? new Buffer(result).toString(DEFAULT_ENCODING) : new Buffer(result),
-            );
+            process.nextTick(callback, null, new Buffer(result));
           } catch (err2) {
             throw err2;
           }
@@ -12020,26 +11770,6 @@ timingSafeEqual &&
     value: "::bunternal::",
   }));
 
-const harcoded_curves = [
-  "p192",
-  "p224",
-  "p256",
-  "p384",
-  "p521",
-  "curve25519",
-  "ed25519",
-  "secp256k1",
-  "secp224r1",
-  "prime256v1",
-  "prime192v1",
-  "secp384r1",
-  "secp521r1",
-];
-
-function getCurves() {
-  return harcoded_curves;
-}
-
 class KeyObject {
   // we use $bunNativePtr so that util.types.isKeyObject can detect it
   $bunNativePtr = undefined;
@@ -12053,8 +11783,9 @@ class KeyObject {
     }
     this.$bunNativePtr = key;
   }
-  toString() {
-    return "[object KeyObject]";
+
+  get [Symbol.toStringTag]() {
+    return "KeyObject";
   }
 
   static from(key) {
@@ -12155,14 +11886,17 @@ function _generateKeyPairSync(algorithm, options) {
 }
 crypto_exports.generateKeyPairSync = _generateKeyPairSync;
 
-crypto_exports.generateKeyPair = function (algorithm, options, callback) {
+function _generateKeyPair(algorithm, options, callback) {
   try {
     const result = _generateKeyPairSync(algorithm, options);
     typeof callback === "function" && callback(null, result.publicKey, result.privateKey);
   } catch (err) {
     typeof callback === "function" && callback(err);
   }
-};
+}
+const { defineCustomPromisifyArgs } = require("internal/promisify");
+defineCustomPromisifyArgs(_generateKeyPair, ["publicKey", "privateKey"]);
+crypto_exports.generateKeyPair = _generateKeyPair;
 
 crypto_exports.createSecretKey = function (key, encoding) {
   if (key instanceof KeyObject || key instanceof CryptoKey) {
@@ -12251,7 +11985,7 @@ function _createPublicKey(key) {
         }
         return KeyObject.from(
           createPublicKey({
-            key: createPrivateKey({ key: actual_key, format: key.format, passphrase: key.passphrase }),
+            key: createPrivateKey({ key: actual_key, format: key.format || "pem", passphrase: key.passphrase }),
             format: "",
           }),
         );
@@ -12383,18 +12117,85 @@ crypto_exports.verify = function (algorithm, data, key, signature, callback) {
   }
 };
 
-__export(crypto_exports, {
-  DEFAULT_ENCODING: () => DEFAULT_ENCODING,
-  getRandomValues: () => getRandomValues,
-  randomUUID: () => randomUUID,
-  randomInt: () => randomInt,
-  getCurves: () => getCurves,
-  scrypt: () => scrypt,
-  scryptSync: () => scryptSync,
-  timingSafeEqual: () => timingSafeEqual,
-  webcrypto: () => webcrypto,
-  subtle: () => _subtle,
-});
+// We are not allowed to call createPublicKey/createPrivateKey when we're already working with a
+// KeyObject/CryptoKey of the same type (public/private).
+function toCryptoKey(key, asPublic) {
+  // Top level CryptoKey.
+  if (key instanceof KeyObject || key instanceof CryptoKey) {
+    if (asPublic && key.type === "private") {
+      return _createPublicKey(key).$bunNativePtr;
+    }
+    return key.$bunNativePtr || key;
+  }
 
+  // Nested CryptoKey.
+  if (key.key instanceof KeyObject || key.key instanceof CryptoKey) {
+    if (asPublic && key.key.type === "private") {
+      return _createPublicKey(key.key).$bunNativePtr;
+    }
+    return key.key.$bunNativePtr || key.key;
+  }
+
+  // One of string, ArrayBuffer, Buffer, TypedArray, DataView, or Object.
+  return asPublic ? _createPublicKey(key).$bunNativePtr : _createPrivateKey(key).$bunNativePtr;
+}
+
+function doAsymmetricCipher(key, message, operation, isEncrypt) {
+  // Our crypto bindings expect the key to be a `JSCryptoKey` property within an object.
+  const cryptoKey = toCryptoKey(key, isEncrypt);
+  const oaepLabel = typeof key.oaepLabel === "string" ? Buffer.from(key.oaepLabel, key.encoding) : key.oaepLabel;
+  const keyObject = {
+    key: cryptoKey,
+    oaepHash: key.oaepHash,
+    oaepLabel,
+    padding: key.padding,
+  };
+  const buffer = typeof message === "string" ? Buffer.from(message, key.encoding) : message;
+  return operation(keyObject, buffer);
+}
+
+crypto_exports.publicEncrypt = function (key, message) {
+  return doAsymmetricCipher(key, message, publicEncrypt, true);
+};
+
+crypto_exports.privateDecrypt = function (key, message) {
+  return doAsymmetricCipher(key, message, privateDecrypt, false);
+};
+
+function doAsymmetricSign(key, message, operation, isEncrypt) {
+  // Our crypto bindings expect the key to be a `JSCryptoKey` property within an object.
+  const cryptoKey = toCryptoKey(key, isEncrypt);
+  const buffer = typeof message === "string" ? Buffer.from(message, key.encoding) : message;
+  return operation(cryptoKey, buffer, key.padding);
+}
+
+crypto_exports.privateEncrypt = function (key, message) {
+  return doAsymmetricSign(key, message, privateEncrypt, false);
+};
+
+crypto_exports.publicDecrypt = function (key, message) {
+  return doAsymmetricSign(key, message, publicDecrypt, true);
+};
+
+crypto_exports.hash = function hash(algorithm, input, outputEncoding = "hex") {
+  return CryptoHasher.hash(algorithm, input, outputEncoding);
+};
+
+crypto_exports.getFips = function getFips() {
+  return 0;
+};
+
+crypto_exports.getRandomValues = getRandomValues;
+crypto_exports.randomUUID = randomUUID;
+crypto_exports.randomInt = randomInt;
+crypto_exports.getCurves = getCurves;
+crypto_exports.getCipherInfo = getCipherInfo;
+crypto_exports.scrypt = scrypt;
+crypto_exports.scryptSync = scryptSync;
+crypto_exports.timingSafeEqual = timingSafeEqual;
+crypto_exports.webcrypto = webcrypto;
+crypto_exports.subtle = _subtle;
+crypto_exports.X509Certificate = X509Certificate;
+crypto_exports.Certificate = Certificate;
 export default crypto_exports;
 /*! safe-buffer. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */

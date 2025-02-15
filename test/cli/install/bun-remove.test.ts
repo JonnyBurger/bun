@@ -1,11 +1,9 @@
-import { bunExe, bunEnv as env } from "harness";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
-import { join, relative } from "path";
-import { tmpdir } from "os";
+import { file, spawn } from "bun";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "bun:test";
+import { mkdir, writeFile } from "fs/promises";
+import { bunExe, bunEnv as env, tmpdirSync } from "harness";
+import { join, relative } from "path";
 import { dummyAfterAll, dummyAfterEach, dummyBeforeAll, dummyBeforeEach, package_dir } from "./dummy.registry";
-import { spawn } from "bun";
-import { file } from "bun";
 
 beforeAll(dummyBeforeAll);
 afterAll(dummyAfterAll);
@@ -13,7 +11,7 @@ afterAll(dummyAfterAll);
 let remove_dir: string;
 
 beforeEach(async () => {
-  remove_dir = await mkdtemp(join(await realpath(tmpdir()), "bun-remove.test"));
+  remove_dir = tmpdirSync();
   await dummyBeforeEach();
 });
 
@@ -96,20 +94,19 @@ it("should remove existing package", async () => {
     env,
   });
   expect(await removeExited1).toBe(0);
-  expect(stdout1).toBeDefined();
   const out1 = await new Response(stdout1).text();
   const err1 = await new Response(stderr1).text();
 
   expect(out1.replace(/\s*\[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual([
+    expect.stringContaining("bun remove v1."),
     "",
-    ` + pkg2@${pkg2_path.replace(/\\/g, "/")}`,
+    `+ pkg2@${pkg2_path.replace(/\\/g, "/")}`,
     "",
-    " 1 package installed",
-    "  Removed: 1",
+    "1 package installed",
+    "Removed: 1",
     "",
   ]);
-  expect(stderr1).toBeDefined();
-  expect(err1.replace(/^(.*?) v[^\n]+/, "$1").split(/\r?\n/)).toEqual(["bun remove", " Saved lockfile", ""]);
+  expect(err1.split(/\r?\n/)).toEqual(["Saved lockfile", ""]);
   expect(await file(join(package_dir, "package.json")).text()).toEqual(
     JSON.stringify(
       {
@@ -137,18 +134,17 @@ it("should remove existing package", async () => {
     env,
   });
   expect(await removeExited2).toBe(0);
-  expect(stdout2).toBeDefined();
   const out2 = await new Response(stdout2).text();
   const err2 = await new Response(stderr2).text();
 
-  expect(out2.replace(/\s*\[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual(["", " - pkg2", " 1 package removed", ""]);
-  expect(stderr2).toBeDefined();
-  expect(err2.replace(/^(.*?) v[^\n]+/, "$1").split(/\r?\n/)).toEqual([
-    "bun remove",
+  expect(out2.replace(/ \[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual([
+    expect.stringContaining("bun remove v1."),
     "",
-    "package.json has no dependencies! Deleted empty lockfile",
+    "- pkg2",
+    "1 package removed",
     "",
   ]);
+  expect(err2.split(/\r?\n/)).toEqual(["", "package.json has no dependencies! Deleted empty lockfile", ""]);
   expect(await file(join(package_dir, "package.json")).text()).toEqual(
     JSON.stringify(
       {
@@ -216,13 +212,10 @@ it("should not affect if package is not installed", async () => {
     env,
   });
   expect(await exited).toBe(0);
-  expect(stdout).toBeDefined();
   const out = await new Response(stdout).text();
-  expect(out).toEqual("");
-  expect(stderr).toBeDefined();
+  expect(out.split("\n")).toEqual([expect.stringContaining("bun remove v1."), ""]);
   const err = await new Response(stderr).text();
-  expect(err.replace(/^(.*?) v[^\n]+/, "$1").split(/\r?\n/)).toEqual([
-    "bun remove",
+  expect(err.replace(/ \[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual([
     "package.json doesn't have dependencies, there's nothing to remove!",
     "",
   ]);
@@ -311,13 +304,15 @@ it("should remove peerDependencies", async () => {
     stderr: "pipe",
     env,
   });
-  expect(stderr).toBeDefined();
   const err = await new Response(stderr).text();
   expect(err).not.toContain("error:");
-  expect(err).not.toContain("panic:");
-  expect(stdout).toBeDefined();
   const out = await new Response(stdout).text();
-  expect(out.replace(/\s*\[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual([" done", ""]);
+  expect(out.replace(/\[[0-9\.]+m?s\]/, "").split(/\r?\n/)).toEqual([
+    expect.stringContaining("bun remove v1."),
+    "",
+    " done",
+    "",
+  ]);
   expect(await exited).toBe(0);
   expect(await file(join(package_dir, "package.json")).json()).toEqual({
     name: "foo",

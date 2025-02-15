@@ -1,212 +1,515 @@
-import tls, { TLSSocket, connect, checkServerIdentity, createServer, Server } from "tls";
+import { describe, expect, it } from "bun:test";
+import { tls as COMMON_CERT_ } from "harness";
+import net from "net";
 import { join } from "path";
-import { AddressInfo } from "ws";
+import tls, { checkServerIdentity, connect as tlsConnect, TLSSocket } from "tls";
+import stream from "stream";
+import { once } from "events";
 
-it("should work with alpnProtocols", done => {
-  try {
-    let socket: TLSSocket | null = connect({
-      ALPNProtocols: ["http/1.1"],
-      host: "bun.sh",
-      servername: "bun.sh",
-      port: 443,
-      rejectUnauthorized: false,
+import { Duplex } from "node:stream";
+import type { AddressInfo } from "net";
+
+const symbolConnectOptions = Symbol.for("::buntlsconnectoptions::");
+
+class SocketProxy extends Duplex {
+  socket: net.Socket;
+  constructor(socket: net.Socket) {
+    super();
+    this.socket = socket;
+
+    // Handle incoming data from the socket
+    this.socket.on("data", chunk => {
+      // Push data to be read by the Duplex stream
+      if (!this.push(chunk)) {
+        this.socket.pause();
+      }
     });
 
-    const timeout = setTimeout(() => {
-      socket?.end();
-      done("timeout");
-    }, 3000);
-
-    socket.on("error", err => {
-      clearTimeout(timeout);
-      done(err);
+    // Handle when the socket ends
+    this.socket.on("end", () => {
+      this.push(null); // Signal that no more data will be provided
     });
 
-    socket.on("secureConnect", () => {
-      clearTimeout(timeout);
-      done(socket?.alpnProtocol === "http/1.1" ? undefined : "alpnProtocol is not http/1.1");
-      socket?.end();
-      socket = null;
+    // Handle socket errors
+    this.socket.on("error", err => {
+      console.error("Socket error:", err);
+      this.destroy(err); // Destroy the stream on error
     });
-  } catch (err) {
-    done(err);
+
+    // Handle socket close
+    this.socket.on("close", () => {
+      this.push(null); // Signal the end of data if the socket closes
+    });
+
+    this.socket.on("drain", () => {
+      this.emit("drain");
+    });
   }
-});
 
-const COMMON_CERT = {
-  cert: "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKLdQVPy90jjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTkwMjAzMTQ0OTM1WhcNMjAwMjAzMTQ0OTM1WjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEA7i7IIEdICTiSTVx+ma6xHxOtcbd6wGW3nkxlCkJ1UuV8NmY5ovMsGnGD\nhJJtUQ2j5ig5BcJUf3tezqCNW4tKnSOgSISfEAKvpn2BPvaFq3yx2Yjz0ruvcGKp\nDMZBXmB/AAtGyN/UFXzkrcfppmLHJTaBYGG6KnmU43gPkSDy4iw46CJFUOupc51A\nFIz7RsE7mbT1plCM8e75gfqaZSn2k+Wmy+8n1HGyYHhVISRVvPqkS7gVLSVEdTea\nUtKP1Vx/818/HDWk3oIvDVWI9CFH73elNxBkMH5zArSNIBTehdnehyAevjY4RaC/\nkK8rslO3e4EtJ9SnA4swOjCiqAIQEwIDAQABo1AwTjAdBgNVHQ4EFgQUv5rc9Smm\n9c4YnNf3hR49t4rH4yswHwYDVR0jBBgwFoAUv5rc9Smm9c4YnNf3hR49t4rH4ysw\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEATcL9CAAXg0u//eYUAlQa\nL+l8yKHS1rsq1sdmx7pvsmfZ2g8ONQGfSF3TkzkI2OOnCBokeqAYuyT8awfdNUtE\nEHOihv4ZzhK2YZVuy0fHX2d4cCFeQpdxno7aN6B37qtsLIRZxkD8PU60Dfu9ea5F\nDDynnD0TUabna6a0iGn77yD8GPhjaJMOz3gMYjQFqsKL252isDVHEDbpVxIzxPmN\nw1+WK8zRNdunAcHikeoKCuAPvlZ83gDQHp07dYdbuZvHwGj0nfxBLc9qt90XsBtC\n4IYR7c/bcLMmKXYf0qoQ4OzngsnPI5M+v9QEHvYWaKVwFY4CTcSNJEwfXw+BAeO5\nOA==\n-----END CERTIFICATE-----",
-  key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDuLsggR0gJOJJN\nXH6ZrrEfE61xt3rAZbeeTGUKQnVS5Xw2Zjmi8ywacYOEkm1RDaPmKDkFwlR/e17O\noI1bi0qdI6BIhJ8QAq+mfYE+9oWrfLHZiPPSu69wYqkMxkFeYH8AC0bI39QVfOSt\nx+mmYsclNoFgYboqeZTjeA+RIPLiLDjoIkVQ66lznUAUjPtGwTuZtPWmUIzx7vmB\n+pplKfaT5abL7yfUcbJgeFUhJFW8+qRLuBUtJUR1N5pS0o/VXH/zXz8cNaTegi8N\nVYj0IUfvd6U3EGQwfnMCtI0gFN6F2d6HIB6+NjhFoL+QryuyU7d7gS0n1KcDizA6\nMKKoAhATAgMBAAECggEAd5g/3o1MK20fcP7PhsVDpHIR9faGCVNJto9vcI5cMMqP\n6xS7PgnSDFkRC6EmiLtLn8Z0k2K3YOeGfEP7lorDZVG9KoyE/doLbpK4MfBAwBG1\nj6AHpbmd5tVzQrnNmuDjBBelbDmPWVbD0EqAFI6mphXPMqD/hFJWIz1mu52Kt2s6\n++MkdqLO0ORDNhKmzu6SADQEcJ9Suhcmv8nccMmwCsIQAUrfg3qOyqU4//8QB8ZM\njosO3gMUesihVeuF5XpptFjrAliPgw9uIG0aQkhVbf/17qy0XRi8dkqXj3efxEDp\n1LSqZjBFiqJlFchbz19clwavMF/FhxHpKIhhmkkRSQKBgQD9blaWSg/2AGNhRfpX\nYq+6yKUkUD4jL7pmX1BVca6dXqILWtHl2afWeUorgv2QaK1/MJDH9Gz9Gu58hJb3\nymdeAISwPyHp8euyLIfiXSAi+ibKXkxkl1KQSweBM2oucnLsNne6Iv6QmXPpXtro\nnTMoGQDS7HVRy1on5NQLMPbUBQKBgQDwmN+um8F3CW6ZV1ZljJm7BFAgNyJ7m/5Q\nYUcOO5rFbNsHexStrx/h8jYnpdpIVlxACjh1xIyJ3lOCSAWfBWCS6KpgeO1Y484k\nEYhGjoUsKNQia8UWVt+uWnwjVSDhQjy5/pSH9xyFrUfDg8JnSlhsy0oC0C/PBjxn\nhxmADSLnNwKBgQD2A51USVMTKC9Q50BsgeU6+bmt9aNMPvHAnPf76d5q78l4IlKt\nwMs33QgOExuYirUZSgjRwknmrbUi9QckRbxwOSqVeMOwOWLm1GmYaXRf39u2CTI5\nV9gTMHJ5jnKd4gYDnaA99eiOcBhgS+9PbgKSAyuUlWwR2ciL/4uDzaVeDQKBgDym\nvRSeTRn99bSQMMZuuD5N6wkD/RxeCbEnpKrw2aZVN63eGCtkj0v9LCu4gptjseOu\n7+a4Qplqw3B/SXN5/otqPbEOKv8Shl/PT6RBv06PiFKZClkEU2T3iH27sws2EGru\nw3C3GaiVMxcVewdg1YOvh5vH8ZVlxApxIzuFlDvnAoGAN5w+gukxd5QnP/7hcLDZ\nF+vesAykJX71AuqFXB4Wh/qFY92CSm7ImexWA/L9z461+NKeJwb64Nc53z59oA10\n/3o2OcIe44kddZXQVP6KTZBd7ySVhbtOiK3/pCy+BQRsrC7d71W914DxNWadwZ+a\njtwwKjDzmPwdIXDSQarCx0U=\n-----END PRIVATE KEY-----",
-  passphrase: "1234",
-};
-
-it("Bun.serve() should work with tls and Bun.file()", async () => {
-  const server = Bun.serve({
-    port: 0,
-    fetch() {
-      return new Response(Bun.file(join(import.meta.dir, "fixtures/index.html")));
-    },
-    tls: {
-      cert: COMMON_CERT.cert,
-      key: COMMON_CERT.key,
-    },
-  });
-  const res = await fetch(`https://${server.hostname}:${server.port}/`, { tls: { rejectUnauthorized: false } });
-  expect(await res.text()).toBe("<h1>HELLO</h1>");
-  server.stop();
-});
-
-it("should have peer certificate when using self asign certificate", async () => {
-  const server = Bun.serve({
-    tls: {
-      cert: COMMON_CERT.cert,
-      key: COMMON_CERT.key,
-      passphrase: COMMON_CERT.passphrase,
-    },
-    port: 0,
-    fetch() {
-      return new Response("Hello World");
-    },
-  });
-
-  const { promise: socketPromise, resolve: resolveSocket, reject: rejectSocket } = Promise.withResolvers();
-  const socket = connect(
-    {
-      ALPNProtocols: ["http/1.1"],
-      host: server.hostname,
-      servername: "localhost",
-      port: server.port,
-      rejectUnauthorized: false,
-      requestCert: true,
-    },
-    resolveSocket,
-  ).on("error", rejectSocket);
-
-  await socketPromise;
-
-  try {
-    expect(socket).toBeDefined();
-    const cert = socket.getPeerCertificate();
-    expect(cert).toBeDefined();
-    expect(cert.subject).toMatchObject({
-      C: "AU",
-      ST: "Some-State",
-      O: "Internet Widgits Pty Ltd",
-    });
-    expect(cert.issuer).toBeDefined();
-    expect(cert.issuer).toMatchObject({
-      C: "AU",
-      ST: "Some-State",
-      O: "Internet Widgits Pty Ltd",
-    });
-    expect(cert.subjectaltname).toBeUndefined();
-    expect(cert.infoAccess).toBeUndefined();
-    expect(cert.ca).toBeTrue();
-    expect(cert.bits).toBe(2048);
-    expect(cert.modulus).toBe(
-      "EE2EC82047480938924D5C7E99AEB11F13AD71B77AC065B79E4C650A427552E57C366639A2F32C1A718384926D510DA3E6283905C2547F7B5ECEA08D5B8B4A9D23A048849F1002AFA67D813EF685AB7CB1D988F3D2BBAF7062A90CC6415E607F000B46C8DFD4157CE4ADC7E9A662C72536816061BA2A7994E3780F9120F2E22C38E8224550EBA9739D40148CFB46C13B99B4F5A6508CF1EEF981FA9A6529F693E5A6CBEF27D471B2607855212455BCFAA44BB8152D254475379A52D28FD55C7FF35F3F1C35A4DE822F0D5588F42147EF77A5371064307E7302B48D2014DE85D9DE87201EBE363845A0BF90AF2BB253B77B812D27D4A7038B303A30A2A8021013",
-    );
-    expect(cert.exponent).toBe("0x10001");
-    expect(cert.pubkey).toBeInstanceOf(Buffer);
-    expect(cert.valid_from).toBe("Feb  3 14:49:35 2019 GMT"); // yes this space is intentional
-    expect(cert.valid_to).toBe("Feb  3 14:49:35 2020 GMT");
-    expect(cert.fingerprint).toBe("48:5F:4B:DB:FD:56:50:32:F0:27:84:3C:3F:B9:6C:DB:13:42:D2:D4");
-    expect(cert.fingerprint256).toBe(
-      "40:F9:8C:B8:9D:3C:0D:93:09:C4:A7:96:B8:A4:69:03:6C:DB:1B:83:C9:0E:76:AE:4A:F4:16:1A:A6:13:50:B2",
-    );
-    expect(cert.fingerprint512).toBe(
-      "98:56:9F:C0:A7:21:AD:BE:F3:11:AD:78:17:61:7C:36:AE:85:AB:AC:9E:1E:BF:AA:F2:92:0D:8B:36:50:07:CF:7B:C3:16:19:0F:1F:B9:09:C9:45:9D:EC:C9:44:66:72:EE:EA:CF:74:23:13:B5:FB:E1:88:52:51:D2:C6:B6:4D",
-    );
-    expect(cert.serialNumber).toBe("A2DD4153F2F748E3");
-    expect(cert.raw).toBeInstanceOf(Buffer);
-  } finally {
-    server.stop();
-    socket.end();
+  // Implement the _read method to receive data
+  _read(size: number) {
+    // Resume the socket if it was paused
+    if (this.socket.isPaused()) {
+      this.socket.resume();
+    }
   }
-});
 
-it("should have peer certificate", async () => {
-  const socket = (await new Promise((resolve, reject) => {
-    const instance = connect(
+  // Implement the _write method to send data
+  _write(chunk, encoding, callback) {
+    // Write data to the socket
+    this.socket.write(chunk, encoding, callback);
+  }
+
+  // Implement the _final method to handle stream ending
+  _final(callback) {
+    // End the socket connection
+    this.socket.end();
+    callback();
+  }
+}
+function duplexProxy(options: tls.ConnectionOptions, callback?: () => void): TLSSocket {
+  if (typeof options === "number") {
+    // handle port, host, options
+    let options = arguments[2] || {};
+    let callback = arguments[3];
+    if (typeof options === "function") {
+      callback = options;
+      options = {};
+    }
+    //@ts-ignore
+
+    const socket = net.connect(arguments[0], arguments[1], options);
+    const duplex = new SocketProxy(socket);
+    return tls.connect(
       {
-        ALPNProtocols: ["http/1.1"],
-        host: "bun.sh",
-        servername: "bun.sh",
-        port: 443,
-        rejectUnauthorized: false,
-        requestCert: true,
+        ...options,
+        socket: duplex,
+        host: arguments[1],
+        servername: options.servername || arguments[1],
       },
-      function () {
-        resolve(instance);
-      },
-    ).on("error", reject);
-  })) as TLSSocket;
-
-  try {
-    expect(socket).toBeDefined();
-    const cert = socket.getPeerCertificate();
-    expect(cert).toBeDefined();
-    expect(cert.subject).toBeDefined();
-    // this should never change
-    expect(cert.subject.CN).toBe("bun.sh");
-    expect(cert.subjectaltname).toContain("DNS:bun.sh");
-    expect(cert.infoAccess).toBeDefined();
-    // we just check the types this can change over time
-    const infoAccess = cert.infoAccess as NodeJS.Dict<string[]>;
-    expect(infoAccess["OCSP - URI"]).toBeDefined();
-    expect(infoAccess["CA Issuers - URI"]).toBeDefined();
-    expect(cert.ca).toBeFalse();
-    expect(cert.bits).toBe(2048);
-    expect(typeof cert.modulus).toBe("string");
-    expect(typeof cert.exponent).toBe("string");
-    expect(cert.pubkey).toBeInstanceOf(Buffer);
-    expect(typeof cert.valid_from).toBe("string");
-    expect(typeof cert.valid_to).toBe("string");
-    expect(typeof cert.fingerprint).toBe("string");
-    expect(typeof cert.fingerprint256).toBe("string");
-    expect(typeof cert.fingerprint512).toBe("string");
-    expect(typeof cert.serialNumber).toBe("string");
-    expect(cert.raw).toBeInstanceOf(Buffer);
-  } finally {
-    socket.end();
+      callback,
+    );
   }
-});
 
-it("getCipher, getProtocol, getEphemeralKeyInfo, getSharedSigalgs, getSession, exportKeyingMaterial and isSessionReused should work", async () => {
-  const socket = (await new Promise((resolve, reject) => {
-    connect({
-      ALPNProtocols: ["http/1.1"],
-      host: "bun.sh",
-      servername: "bun.sh",
-      port: 443,
-      rejectUnauthorized: false,
-      requestCert: true,
-    })
-      .on("secure", resolve)
-      .on("error", reject);
-  })) as TLSSocket;
-
-  try {
-    expect(socket.getCipher()).toMatchObject({
-      name: "TLS_AES_128_GCM_SHA256",
-      standardName: "TLS_AES_128_GCM_SHA256",
-      version: "TLSv1/SSLv3",
-    });
-    expect(socket.getProtocol()).toBe("TLSv1.3");
-    expect(typeof socket.getEphemeralKeyInfo()).toBe("object");
-    expect(socket.getSharedSigalgs()).toBeInstanceOf(Array);
-    expect(socket.getSession()).toBeInstanceOf(Buffer);
-    expect(socket.exportKeyingMaterial(512, "client finished")).toBeInstanceOf(Buffer);
-    expect(socket.isSessionReused()).toBe(false);
-
-    // BoringSSL does not support these methods for >= TLSv1.3
-    expect(socket.getFinished()).toBeUndefined();
-    expect(socket.getPeerFinished()).toBeUndefined();
-  } finally {
-    socket.end();
-  }
-});
+  //@ts-ignore
+  const socket = net.connect(options);
+  const duplex = new SocketProxy(socket);
+  return tls.connect(
+    {
+      ...options,
+      socket: duplex,
+      host: options.host,
+      servername: options.servername || options.host,
+    },
+    callback,
+  );
+}
+const tests = [
+  {
+    name: "tls.connect",
+    connect: tlsConnect,
+  },
+  {
+    name: "tls.connect using duplex proxy",
+    connect: duplexProxy,
+  },
+];
 
 it("should have checkServerIdentity", async () => {
   expect(checkServerIdentity).toBeFunction();
   expect(tls.checkServerIdentity).toBeFunction();
 });
+
+it("should thow ECONNRESET if FIN is received before handshake", async () => {
+  await using server = net.createServer(c => {
+    c.end();
+  });
+  await once(server.listen(0, "127.0.0.1"), "listening");
+  const { promise, resolve } = Promise.withResolvers();
+  tls.connect((server.address() as AddressInfo).port).on("error", resolve);
+
+  const error = await promise;
+
+  expect(error).toBeDefined();
+  // TODO: today we are a little incompatible with node.js we need to change `UNABLE_TO_GET_ISSUER_CERT` when closed before handshake complete on the openssl.c to emit error `ECONNRESET` instead of SSL fail,
+  // current behavior is not wrong because is the right error but is incompatible with node.js
+  expect((error as Error).code as string).toBeOneOf(["ECONNRESET", "UNABLE_TO_GET_ISSUER_CERT"]);
+});
+it("should be able to grab the JSStreamSocket constructor", () => {
+  // this keep http2-wrapper compatibility with node.js
+  const socket = new tls.TLSSocket(new stream.PassThrough());
+  //@ts-ignore
+  expect(socket._handle).not.toBeNull();
+  //@ts-ignore
+  expect(socket._handle._parentWrap).not.toBeNull();
+  //@ts-ignore
+  expect(socket._handle._parentWrap.constructor).toBeFunction();
+});
+for (const { name, connect } of tests) {
+  describe(name, () => {
+    it("should work with alpnProtocols", done => {
+      try {
+        let socket: TLSSocket | null = connect({
+          ALPNProtocols: ["http/1.1"],
+          host: "bun.sh",
+          servername: "bun.sh",
+          port: 443,
+          rejectUnauthorized: false,
+        });
+
+        socket.on("error", err => {
+          done(err);
+        });
+
+        socket.on("secureConnect", () => {
+          done(socket?.alpnProtocol === "http/1.1" ? undefined : "alpnProtocol is not http/1.1");
+          socket?.end();
+          socket = null;
+        });
+      } catch (err) {
+        done(err);
+      }
+    });
+    const COMMON_CERT = { ...COMMON_CERT_ };
+
+    it("Bun.serve() should work with tls and Bun.file()", async () => {
+      using server = Bun.serve({
+        port: 0,
+        fetch() {
+          return new Response(Bun.file(join(import.meta.dir, "fixtures/index.html")));
+        },
+        tls: {
+          cert: COMMON_CERT.cert,
+          key: COMMON_CERT.key,
+        },
+      });
+      const res = await fetch(`https://${server.hostname}:${server.port}/`, { tls: { rejectUnauthorized: false } });
+      expect(await res.text()).toBe("<h1>HELLO</h1>");
+    });
+
+    it("should have peer certificate when using self asign certificate", async () => {
+      using server = Bun.serve({
+        tls: {
+          cert: COMMON_CERT.cert,
+          key: COMMON_CERT.key,
+          passphrase: COMMON_CERT.passphrase,
+        },
+        port: 0,
+        fetch() {
+          return new Response("Hello World");
+        },
+      });
+
+      const { promise: socketPromise, resolve: resolveSocket, reject: rejectSocket } = Promise.withResolvers();
+      const socket = connect(
+        {
+          ALPNProtocols: ["http/1.1"],
+          host: server.hostname,
+          servername: "localhost",
+          port: server.port,
+          rejectUnauthorized: false,
+          requestCert: true,
+        },
+        resolveSocket,
+      ).on("error", rejectSocket);
+
+      await socketPromise;
+
+      try {
+        expect(socket).toBeDefined();
+        const cert = socket.getPeerCertificate();
+        expect(cert).toBeDefined();
+        expect(cert.subject).toMatchObject({
+          C: "US",
+          CN: "server-bun",
+          L: "San Francisco",
+          O: "Oven",
+          OU: "Team Bun",
+          ST: "CA",
+        });
+        expect(cert.issuer).toBeDefined();
+        expect(cert.issuer).toMatchObject({
+          C: "US",
+          CN: "server-bun",
+          L: "San Francisco",
+          O: "Oven",
+          OU: "Team Bun",
+          ST: "CA",
+        });
+        expect(cert.subjectaltname).toBe("DNS:localhost, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1");
+        expect(cert.infoAccess).toBeUndefined();
+        expect(cert.ca).toBeFalse();
+        expect(cert.bits).toBe(2048);
+        expect(cert.modulus).toBe(
+          "beee8773af7c8861ec11351188b9b1798734fb0729b674369be3285a29fe5dacbfab700d09d7904cf1027d89298bd68be0ef1df94363012b0deb97f632cb76894bcc216535337b9db6125ef68996dd35b4bea07e86c41da071907a86651e84f8c72141f889cc0f770554791e9f07bbe47c375d2d77b44dbe2ab0ed442bc1f49abe4f8904977e3dfd61cd501d8eff819ff1792aedffaca7d281fd1db8c5d972d22f68fa7103ca11ac9aaed1cdd12c33c0b8b47964b37338953d2415edce8b83d52e2076ca960385cc3a5ca75a75951aafdb2ad3db98a6fdd4baa32f575fea7b11f671a9eaa95d7d9faf958ac609f3c48dec5bddcf1bc1542031ed9d4b281d7dd1",
+        );
+        expect(cert.exponent).toBe("0x10001");
+        expect(cert.pubkey).toBeInstanceOf(Buffer);
+        expect(cert.valid_from).toBe("Sep  6 23:27:34 2023 GMT"); // yes this space is intentional
+        expect(cert.valid_to).toBe("Sep  5 23:27:34 2025 GMT");
+        expect(cert.fingerprint).toBe("E3:90:9C:A8:AB:80:48:37:8D:CE:11:64:45:3A:EB:AD:C8:3C:B3:5C");
+        expect(cert.fingerprint256).toBe(
+          "53:DD:15:78:60:FD:66:8C:43:9E:19:7E:CF:2C:AF:49:3C:D1:11:EC:61:2D:F5:DC:1D:0A:FA:CD:12:F9:F8:E0",
+        );
+        expect(cert.fingerprint512).toBe(
+          "2D:31:CB:D2:A0:CA:E5:D4:B5:59:11:48:4B:BC:65:11:4F:AB:02:24:59:D8:73:43:2F:9A:31:92:BC:AF:26:66:CD:DB:8B:03:74:0C:C1:84:AF:54:2D:7C:FD:EF:07:6E:85:66:98:6B:82:4F:A5:72:97:A2:19:8C:7B:57:D6:15",
+        );
+        expect(cert.serialNumber).toBe("1da7a7b8d71402ed2d8c3646a5cedf2b8117efc8");
+        expect(cert.raw).toBeInstanceOf(Buffer);
+      } finally {
+        socket.end();
+      }
+    });
+
+    it("should have peer certificate", async () => {
+      const socket = (await new Promise((resolve, reject) => {
+        const instance = connect(
+          {
+            ALPNProtocols: ["http/1.1"],
+            host: "bun.sh",
+            servername: "bun.sh",
+            port: 443,
+            rejectUnauthorized: false,
+            requestCert: true,
+          },
+          function () {
+            resolve(instance);
+          },
+        ).on("error", reject);
+      })) as TLSSocket;
+
+      try {
+        expect(socket).toBeDefined();
+        const cert = socket.getPeerCertificate();
+        expect(cert).toBeDefined();
+        expect(cert.subject).toBeDefined();
+        // this should never change
+        expect(cert.subject.CN).toBe("bun.sh");
+        expect(cert.subjectaltname).toContain("DNS:bun.sh");
+        expect(cert.infoAccess).toBeDefined();
+        // we just check the types this can change over time
+        const infoAccess = cert.infoAccess as NodeJS.Dict<string[]>;
+        expect(infoAccess["OCSP - URI"]).toBeDefined();
+        expect(infoAccess["CA Issuers - URI"]).toBeDefined();
+        expect(cert.ca).toBeFalse();
+        expect(cert.bits).toBeInteger();
+        // These can change:
+        // expect(typeof cert.modulus).toBe("string");
+        // expect(typeof cert.exponent).toBe("string");
+        expect(cert.pubkey).toBeInstanceOf(Buffer);
+        expect(typeof cert.valid_from).toBe("string");
+        expect(typeof cert.valid_to).toBe("string");
+        expect(typeof cert.fingerprint).toBe("string");
+        expect(typeof cert.fingerprint256).toBe("string");
+        expect(typeof cert.fingerprint512).toBe("string");
+        expect(typeof cert.serialNumber).toBe("string");
+        expect(cert.raw).toBeInstanceOf(Buffer);
+      } finally {
+        socket.end();
+      }
+    });
+
+    it("getCipher, getProtocol, getEphemeralKeyInfo, getSharedSigalgs, getSession, exportKeyingMaterial and isSessionReused should work", async () => {
+      const allowedCipherObjects = [
+        {
+          name: "TLS_AES_128_GCM_SHA256",
+          standardName: "TLS_AES_128_GCM_SHA256",
+          version: "TLSv1/SSLv3",
+        },
+        {
+          name: "TLS_AES_256_GCM_SHA384",
+          standardName: "TLS_AES_256_GCM_SHA384",
+          version: "TLSv1/SSLv3",
+        },
+        {
+          name: "TLS_CHACHA20_POLY1305_SHA256",
+          standardName: "TLS_CHACHA20_POLY1305_SHA256",
+          version: "TLSv1/SSLv3",
+        },
+      ];
+      const socket = (await new Promise((resolve, reject) => {
+        connect({
+          ALPNProtocols: ["http/1.1"],
+          host: "bun.sh",
+          servername: "bun.sh",
+          port: 443,
+          rejectUnauthorized: false,
+          requestCert: true,
+        })
+          .on("secure", resolve)
+          .on("error", reject);
+      })) as TLSSocket;
+
+      try {
+        const cipher = socket.getCipher();
+        let hadMatch = false;
+        for (const allowedCipher of allowedCipherObjects) {
+          if (cipher.name === allowedCipher.name) {
+            expect(cipher).toMatchObject(allowedCipher);
+            hadMatch = true;
+            break;
+          }
+        }
+        if (!hadMatch) {
+          throw new Error(`Unexpected cipher ${cipher.name}`);
+        }
+        expect(socket.getProtocol()).toBe("TLSv1.3");
+        expect(typeof socket.getEphemeralKeyInfo()).toBe("object");
+        expect(socket.getSharedSigalgs()).toBeInstanceOf(Array);
+        expect(socket.getSession()).toBeInstanceOf(Buffer);
+        expect(socket.exportKeyingMaterial(512, "client finished")).toBeInstanceOf(Buffer);
+        expect(socket.isSessionReused()).toBe(false);
+
+        // BoringSSL does not support these methods for >= TLSv1.3
+        expect(socket.getFinished()).toBeUndefined();
+        expect(socket.getPeerFinished()).toBeUndefined();
+      } finally {
+        socket.end();
+      }
+    });
+
+    // Test using only options
+    it("should process options correctly when connect is called with only options", done => {
+      let socket = connect({
+        port: 443,
+        host: "bun.sh",
+        rejectUnauthorized: false,
+      });
+
+      socket.on("secureConnect", () => {
+        expect(socket.remotePort).toBe(443);
+        expect(socket[symbolConnectOptions].serverName).toBe("bun.sh");
+        socket.end();
+        done();
+      });
+
+      socket.on("error", err => {
+        socket.end();
+        done(err);
+      });
+    });
+
+    // Test using port and host
+    it("should process port and host correctly", done => {
+      let socket = connect(443, "bun.sh", {
+        rejectUnauthorized: false,
+      });
+
+      socket.on("secureConnect", () => {
+        if (connect === tlsConnect) {
+          expect(socket.remotePort).toBe(443);
+        }
+        expect(socket[symbolConnectOptions].serverName).toBe("bun.sh");
+        socket.end();
+        done();
+      });
+
+      socket.on("error", err => {
+        socket.end();
+        done(err);
+      });
+    });
+
+    // Test using port, host, and callback
+    it("should process port, host, and callback correctly", done => {
+      let socket = connect(
+        443,
+        "bun.sh",
+        {
+          rejectUnauthorized: false,
+        },
+        () => {
+          if (connect === tlsConnect) {
+            expect(socket.remotePort).toBe(443);
+          }
+          expect(socket[symbolConnectOptions].serverName).toBe("bun.sh");
+          socket.end();
+          done();
+        },
+      ).on("error", err => {
+        done(err);
+      });
+    });
+
+    // Additional tests to ensure the callback is optional and handled correctly
+    it("should handle the absence of a callback gracefully", done => {
+      let socket = connect(443, "bun.sh", {
+        rejectUnauthorized: false,
+      });
+
+      socket.on("secureConnect", () => {
+        expect(socket[symbolConnectOptions].serverName).toBe("bun.sh");
+        if (connect === tlsConnect) {
+          expect(socket.remotePort).toBe(443);
+        }
+        socket.end();
+        done();
+      });
+
+      socket.on("error", err => {
+        socket.end();
+        done(err);
+      });
+    });
+
+    it("should timeout", done => {
+      const socket = connect(
+        {
+          port: 443,
+          host: "bun.sh",
+        },
+        () => {
+          socket.setTimeout(1000, () => {
+            clearTimeout(timer);
+            done();
+            socket.end();
+          });
+        },
+      );
+
+      const timer = setTimeout(() => {
+        socket.end();
+        done(new Error("timeout did not trigger"));
+      }, 8000);
+
+      socket.on("error", err => {
+        clearTimeout(timer);
+
+        socket.end();
+        done(err);
+      });
+    }, 10_000); // 10 seconds because uWS sometimes is not that precise with timeouts
+
+    it("should be able to transfer data", done => {
+      const socket = connect(
+        {
+          port: 443,
+          host: "bun.sh",
+          servername: "bun.sh",
+        },
+        () => {
+          let data = "";
+          socket.on("data", chunk => {
+            data += chunk.toString();
+          });
+          socket.on("end", () => {
+            if (data.indexOf("HTTP/1.1 200 OK") !== -1) {
+              done();
+            } else {
+              done(new Error("missing data"));
+            }
+          });
+          socket.write("GET / HTTP/1.1\r\n");
+          socket.write("Host: bun.sh\r\n");
+          socket.write("Connection: close\r\n");
+          socket.write("Content-Length: 0\r\n");
+          socket.write("\r\n");
+        },
+      );
+      socket.on("error", err => {
+        socket.end();
+        done(err);
+      });
+    });
+  });
+}

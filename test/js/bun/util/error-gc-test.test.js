@@ -1,5 +1,7 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { readFileSync } from "fs";
+import { tmpdirSync } from "harness";
+import { join } from "path";
 // This test checks that printing stack traces increments and decrements
 // reference-counted strings
 test("error gc test", () => {
@@ -47,10 +49,13 @@ test("error gc test #3", () => {
 // - it crashes
 // - The test failure message gets a non-sensical error
 test("error gc test #4", () => {
-  for (let i = 0; i < 1000; i++) {
-    let path =
-      // Use a long-enough string for it to be obvious if we leak memory
-      "/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/ii/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/ii/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i/don/t/exist/tmp/i";
+  const tmp = tmpdirSync();
+  const base = Buffer.from(join(tmp, "does", "not", "exist").repeat(10));
+
+  function iterate() {
+    // Use a long-enough string for it to be obvious if we leak memory
+    // Use .toString() on the Buffer to ensure we clone the string every time.
+    let path = base.toString();
     try {
       readFileSync(path);
       throw new Error("unreachable");
@@ -59,8 +64,14 @@ test("error gc test #4", () => {
         throw e;
       }
 
-      const inspected = Bun.inspect(e);
+      path = path.replaceAll("\\", "/");
+      if (e.path) {
+        e.path = e.path.replaceAll("\\", "/");
+      }
+
+      let inspected = Bun.inspect(e);
       Bun.gc(true);
+      inspected = inspected.replaceAll("\\", "/");
 
       // Deliberately avoid using .toContain() directly to avoid
       // BunString shenanigins.
@@ -77,5 +88,9 @@ test("error gc test #4", () => {
     } finally {
       Bun.gc(true);
     }
+  }
+
+  for (let i = 0; i < 1000; i++) {
+    iterate();
   }
 });

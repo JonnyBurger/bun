@@ -3,6 +3,7 @@ import { define } from "../../codegen/class-definitions";
 function generate(name) {
   return define({
     name,
+    memoryCost: true,
     proto: {
       fetch: {
         fn: "doFetch",
@@ -16,9 +17,17 @@ function generate(name) {
         fn: "doPublish",
         length: 3,
       },
+      subscriberCount: {
+        fn: "doSubscriberCount",
+        length: 1,
+      },
       reload: {
         fn: "doReload",
         length: 2,
+      },
+      "@@dispose": {
+        fn: "dispose",
+        length: 0,
       },
       stop: {
         fn: "doStop",
@@ -27,6 +36,10 @@ function generate(name) {
       requestIP: {
         fn: "doRequestIP",
         length: 1,
+      },
+      timeout: {
+        fn: "doTimeout",
+        length: 2,
       },
       port: {
         getter: "getPort",
@@ -81,6 +94,7 @@ export default [
   define({
     name: "ServerWebSocket",
     JSType: "0b11101110",
+    memoryCost: true,
     proto: {
       send: {
         fn: "send",
@@ -139,14 +153,17 @@ export default [
       close: {
         fn: "close",
         length: 3,
+        passThis: true,
       },
       terminate: {
         fn: "terminate",
         length: 0,
+        passThis: true,
       },
       cork: {
         fn: "cork",
         length: 1,
+        passThis: true,
       },
       getBufferedAmount: {
         fn: "getBufferedAmount",
@@ -187,6 +204,19 @@ export default [
     },
     finalize: true,
     construct: true,
+    klass: {},
+  }),
+
+  define({
+    name: "HTMLBundle",
+    noConstructor: true,
+    finalize: true,
+    proto: {
+      index: {
+        getter: "getIndex",
+        cache: true,
+      },
+    },
     klass: {},
   }),
 ];

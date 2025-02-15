@@ -1,7 +1,7 @@
+import { describe, expect, jest, test } from "bun:test";
 import fs from "fs";
-import { join } from "path";
-import { describe, test, expect, jest } from "bun:test";
 import { tempDirWithFiles } from "harness";
+import { join } from "path";
 
 const impls = [
   ["cpSync", fs.cpSync],
@@ -43,7 +43,7 @@ for (const [name, copy] of impls) {
 
       const e = await copyShouldThrow(basename + "/from", basename + "/result");
       expect(e.code).toBe("EISDIR");
-      expect(e.path).toBe(basename + "/from");
+      expect(e.path).toBe(join(basename, "from"));
     });
 
     test("recursive directory structure - no destination", async () => {
@@ -137,7 +137,7 @@ for (const [name, copy] of impls) {
         errorOnExist: true,
       });
       expect(e.code).toBe("EEXIST");
-      expect(e.path).toBe(basename + "/result/a.txt");
+      expect(e.path).toBe(join(basename, "result", "a.txt"));
 
       assertContent(basename + "/result/a.txt", "win");
     });
@@ -306,6 +306,14 @@ for (const [name, copy] of impls) {
 
       assertContent(basename + "/result/a.dir/c.txt", "c");
     });
+
+    test.if(process.platform === "win32")("should not throw EBUSY when copying the same file on windows", async () => {
+      const basename = tempDirWithFiles("cp", {
+        "hey": "hi",
+      });
+
+      await copy(basename + "/hey", basename + "/hey");
+    });
   });
 }
 
@@ -313,5 +321,5 @@ test("cp with missing callback throws", () => {
   expect(() => {
     // @ts-expect-error
     fs.cp("a", "b" as any);
-  }).toThrow(/Callback/);
+  }).toThrow(/"cb"/);
 });

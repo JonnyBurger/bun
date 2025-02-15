@@ -19,7 +19,7 @@ const LPFN_CONNECTEX = *const anyopaque;
 const FILE = std.c.FILE;
 const CRITICAL_SECTION = std.os.windows.CRITICAL_SECTION;
 const INPUT_RECORD = windows.INPUT_RECORD;
-const sockaddr = std.os.sockaddr;
+const sockaddr = std.posix.sockaddr;
 const sockaddr_storage = std.os.linux.sockaddr_storage;
 const sockaddr_un = std.os.linux.sockaddr_un;
 const BOOL = windows.BOOL;
@@ -211,16 +211,19 @@ pub const O = struct {
     pub const SYMLINK = UV_FS_O_SYMLINK;
     pub const SYNC = UV_FS_O_SYNC;
 
-    pub fn fromStd(c_flags: i32) i32 {
+    pub fn fromBunO(c_flags: i32) i32 {
         var flags: i32 = 0;
-        if (c_flags & std.os.O.NONBLOCK != 0) flags |= NONBLOCK;
-        if (c_flags & std.os.O.CREAT != 0) flags |= CREAT;
-        if (c_flags & std.os.O.NOFOLLOW != 0) flags |= NOFOLLOW;
-        if (c_flags & std.os.O.WRONLY != 0) flags |= WRONLY;
-        if (c_flags & std.os.O.RDONLY != 0) flags |= RDONLY;
-        if (c_flags & std.os.O.RDWR != 0) flags |= RDWR;
-        if (c_flags & std.os.O.TRUNC != 0) flags |= TRUNC;
-        if (c_flags & std.os.O.APPEND != 0) flags |= APPEND;
+
+        if (c_flags & bun.O.NONBLOCK != 0) flags |= NONBLOCK;
+        if (c_flags & bun.O.CREAT != 0) flags |= CREAT;
+        if (c_flags & bun.O.NOFOLLOW != 0) flags |= NOFOLLOW;
+        if (c_flags & bun.O.WRONLY != 0) flags |= WRONLY;
+        if (c_flags & bun.O.RDONLY != 0) flags |= RDONLY;
+        if (c_flags & bun.O.RDWR != 0) flags |= RDWR;
+        if (c_flags & bun.O.TRUNC != 0) flags |= TRUNC;
+        if (c_flags & bun.O.APPEND != 0) flags |= APPEND;
+        if (c_flags & bun.O.EXCL != 0) flags |= EXCL;
+        if (c_flags & FILEMAP != 0) flags |= FILEMAP;
 
         return flags;
     }
@@ -240,7 +243,8 @@ const _O_SHORT_LIVED = 0x1000;
 const _O_SEQUENTIAL = 0x0020;
 const _O_RANDOM = 0x0010;
 
-// These **do not** map to std.os.O!
+// These **do not** map to std.posix.O/bun.O
+// To use libuv O, use libuv.O.
 pub const UV_FS_O_APPEND = 0x0008;
 pub const UV_FS_O_CREAT = _O_CREAT;
 pub const UV_FS_O_EXCL = 0x0400;
@@ -297,7 +301,6 @@ pub const uv_tcp_accept_s = struct_uv_tcp_accept_s;
 pub const uv_tcp_s = struct_uv_tcp_s;
 pub const uv_udp_s = struct_uv_udp_s;
 pub const uv_pipe_accept_s = struct_uv_pipe_accept_s;
-pub const uv_timer_s = struct_uv_timer_s;
 pub const uv_write_s = struct_uv_write_s;
 pub const uv_tty_s = struct_uv_tty_s;
 pub const uv_poll_s = struct_uv_poll_s;
@@ -680,16 +683,6 @@ pub const Loop = extern struct {
 
     pub fn wakeup(this: *Loop) void {
         this.wq_async.send();
-    }
-
-    pub fn refConcurrently(this: *Loop) void {
-        log("refConcurrently", .{});
-        _ = @atomicRmw(c_uint, &this.active_handles, std.builtin.AtomicRmwOp.Add, 1, .Monotonic);
-    }
-
-    pub fn unrefConcurrently(this: *Loop) void {
-        log("unrefConcurrently", .{});
-        _ = @atomicRmw(c_uint, &this.active_handles, std.builtin.AtomicRmwOp.Sub, 1, .Monotonic);
     }
 
     pub fn unrefCount(this: *Loop, count: i32) void {
@@ -1166,8 +1159,8 @@ const union_unnamed_411 = extern union {
     fd: c_int,
     reserved: [4]?*anyopaque,
 };
-pub const uv_timer_cb = ?*const fn (*uv_timer_t) callconv(.C) void;
-pub const struct_uv_timer_s = extern struct {
+pub const uv_timer_cb = ?*const fn (*Timer) callconv(.C) void;
+pub const Timer = extern struct {
     data: ?*anyopaque,
     loop: *uv_loop_t,
     type: uv_handle_type,
@@ -1182,8 +1175,33 @@ pub const struct_uv_timer_s = extern struct {
     repeat: u64,
     start_id: u64,
     timer_cb: uv_timer_cb,
+
+    pub fn init(this: *@This(), loop: *Loop) void {
+        if (uv_timer_init(loop, this) != 0) {
+            @panic("internal error: uv_timer_init failed");
+        }
+    }
+
+    pub fn start(this: *@This(), timeout: u64, repeat: u64, callback: uv_timer_cb) void {
+        if (uv_timer_start(this, callback, timeout, repeat) != 0) {
+            @panic("internal error: uv_timer_start failed");
+        }
+    }
+
+    pub fn stop(this: *@This()) void {
+        if (uv_timer_stop(this) != 0) {
+            @panic("internal error: uv_timer_stop failed");
+        }
+    }
+
+    pub fn unref(this: *@This()) void {
+        uv_unref(@alignCast(@ptrCast(this)));
+    }
+
+    pub fn ref(this: *@This()) void {
+        uv_ref(@alignCast(@ptrCast(this)));
+    }
 };
-pub const uv_timer_t = struct_uv_timer_s;
 const struct_unnamed_413 = extern struct {
     overlapped: OVERLAPPED,
     queued_bytes: usize,
@@ -1246,7 +1264,7 @@ const union_unnamed_415 = extern union {
     dummy: u64,
 };
 const struct_unnamed_410 = extern struct {
-    eof_timer: [*c]uv_timer_t,
+    eof_timer: [*c]Timer,
     dummy: uv_write_t,
     ipc_remote_pid: DWORD,
     ipc_data_frame: union_unnamed_415,
@@ -1289,14 +1307,15 @@ pub const Pipe = extern struct {
         return .{ .result = {} };
     }
 
-    pub fn open(this: *Pipe, file: uv_file) Maybe(void) {
-        if (uv_pipe_open(this, file).toError(.open)) |err| return .{ .err = err };
+    pub fn open(this: *Pipe, file: bun.FileDescriptor) Maybe(void) {
+        const uv_fd = bun.uvfdcast(file);
+        if (uv_pipe_open(this, uv_fd).toError(.open)) |err| return .{ .err = err };
 
         return .{ .result = {} };
     }
 
     pub fn listenNamedPipe(this: *@This(), named_pipe: []const u8, backlog: i32, context: anytype, comptime onClientConnect: *const (fn (@TypeOf(context), ReturnCode) void)) Maybe(void) {
-        if (this.bind(named_pipe, 0).asErr()) |err| {
+        if (this.bind(named_pipe, UV_PIPE_NO_TRUNCATE).asErr()) |err| {
             return .{ .err = err };
         }
         return this.listen(backlog, context, onClientConnect);
@@ -1316,8 +1335,7 @@ pub const Pipe = extern struct {
                 onConnect(@ptrCast(@alignCast(handle.data)), status);
             }
         };
-
-        if (uv_pipe_connect2(req, this, @ptrCast(name.ptr), name.len, 0, &Wrapper.uvConnectCb).toError(.connect2)) |err| {
+        if (uv_pipe_connect2(req, this, @ptrCast(name.ptr), name.len, UV_PIPE_NO_TRUNCATE, &Wrapper.uvConnectCb).toError(.connect2)) |err| {
             return .{ .err = err };
         }
         return .{ .result = {} };
@@ -1814,7 +1832,7 @@ pub const fs_t = extern struct {
     ///
     /// It is assumed that if UV overwrites the .loop, it probably overwrote the rest of the struct.
     pub const uninitialized: fs_t = if (bun.Environment.allow_assert) value: {
-        comptime var value = std.mem.zeroes(fs_t);
+        var value = std.mem.zeroes(fs_t);
         value.loop = @ptrFromInt(0xAAAAAAAAAAAA0000);
         break :value value;
     } else undefined;
@@ -1950,6 +1968,10 @@ pub const struct_uv_statfs_s = extern struct {
     f_files: u64,
     f_ffree: u64,
     f_spare: [4]u64,
+
+    pub fn init(this: *align(1) struct_uv_statfs_s) bun.StatFS {
+        return this.*;
+    }
 };
 pub const uv_statfs_t = struct_uv_statfs_s;
 pub const struct_uv_metrics_s = extern struct {
@@ -2001,20 +2023,20 @@ pub const UV_CLOCK_MONOTONIC: c_int = 0;
 pub const UV_CLOCK_REALTIME: c_int = 1;
 pub const uv_clock_id = c_uint;
 pub const uv_timespec_t = extern struct {
-    tv_sec: c_long,
-    tv_nsec: c_long,
+    sec: c_long,
+    nsec: c_long,
 };
 pub const uv_timespec64_t = extern struct {
-    tv_sec: i64,
-    tv_nsec: i32,
+    sec: i64,
+    nsec: i32,
 };
 pub const uv_timeval_t = extern struct {
-    tv_sec: c_long,
-    tv_usec: c_long,
+    sec: c_long,
+    usec: c_long,
 };
 pub const uv_timeval64_t = extern struct {
-    tv_sec: i64,
-    tv_usec: i32,
+    sec: i64,
+    usec: i32,
 };
 pub const uv_stat_t = extern struct {
     dev: u64,
@@ -2185,13 +2207,13 @@ pub extern fn uv_idle_start(idle: [*c]uv_idle_t, cb: uv_idle_cb) c_int;
 pub extern fn uv_idle_stop(idle: [*c]uv_idle_t) c_int;
 pub extern fn uv_async_init(*uv_loop_t, @"async": *uv_async_t, async_cb: uv_async_cb) c_int;
 pub extern fn uv_async_send(@"async": *uv_async_t) c_int;
-pub extern fn uv_timer_init(*uv_loop_t, handle: *uv_timer_t) c_int;
-pub extern fn uv_timer_start(handle: *uv_timer_t, cb: uv_timer_cb, timeout: u64, repeat: u64) c_int;
-pub extern fn uv_timer_stop(handle: *uv_timer_t) c_int;
-pub extern fn uv_timer_again(handle: *uv_timer_t) c_int;
-pub extern fn uv_timer_set_repeat(handle: *uv_timer_t, repeat: u64) void;
-pub extern fn uv_timer_get_repeat(handle: *const uv_timer_t) u64;
-pub extern fn uv_timer_get_due_in(handle: *const uv_timer_t) u64;
+pub extern fn uv_timer_init(*uv_loop_t, handle: *Timer) c_int;
+pub extern fn uv_timer_start(handle: *Timer, cb: uv_timer_cb, timeout: u64, repeat: u64) c_int;
+pub extern fn uv_timer_stop(handle: *Timer) c_int;
+pub extern fn uv_timer_again(handle: *Timer) c_int;
+pub extern fn uv_timer_set_repeat(handle: *Timer, repeat: u64) void;
+pub extern fn uv_timer_get_repeat(handle: *const Timer) u64;
+pub extern fn uv_timer_get_due_in(handle: *const Timer) u64;
 pub extern fn uv_getaddrinfo(loop: *uv_loop_t, req: *uv_getaddrinfo_t, getaddrinfo_cb: uv_getaddrinfo_cb, node: [*:0]const u8, service: [*:0]const u8, hints: ?*const anyopaque) ReturnCode;
 pub extern fn uv_freeaddrinfo(ai: *anyopaque) void;
 pub extern fn uv_getnameinfo(loop: *uv_loop_t, req: [*c]uv_getnameinfo_t, getnameinfo_cb: uv_getnameinfo_cb, addr: [*c]const sockaddr, flags: c_int) c_int;
@@ -2252,8 +2274,7 @@ pub const uv_stdio_container_t = struct_uv_stdio_container_s;
 pub const uv_process_options_t = extern struct {
     exit_cb: uv_exit_cb,
     file: [*:0]const u8,
-    // TODO(@paperdave): upstream changing libuv's args to const
-    // it is not mutated in any of their code
+    // In libuv, this is not 'const', but they never mutate it.
     args: [*:null]?[*:0]const u8,
     env: [*:null]?[*:0]const u8,
     cwd: [*:0]const u8,
@@ -2312,7 +2333,7 @@ pub const uv_rusage_t = extern struct {
     ru_nivcsw: u64,
 };
 pub extern fn uv_getrusage(rusage: [*c]uv_rusage_t) c_int;
-pub extern fn uv_os_homedir(buffer: [*]u8, size: [*c]usize) c_int;
+pub extern fn uv_os_homedir(buffer: [*]u8, size: *usize) ReturnCode;
 pub extern fn uv_os_tmpdir(buffer: [*]u8, size: [*c]usize) c_int;
 pub extern fn uv_os_get_passwd(pwd: [*c]uv_passwd_t) c_int;
 pub extern fn uv_os_free_passwd(pwd: [*c]uv_passwd_t) void;
@@ -2531,7 +2552,7 @@ pub const union_uv_any_handle = extern union {
     process: uv_process_t,
     stream: uv_stream_t,
     tcp: uv_tcp_t,
-    timer: uv_timer_t,
+    timer: Timer,
     tty: uv_tty_t,
     udp: uv_udp_t,
     signal: uv_signal_t,
@@ -2629,7 +2650,7 @@ pub fn translateUVErrorToE(code_in: anytype) bun.C.E {
         UV_EREMOTEIO => bun.C.E.REMOTEIO,
         UV_ECANCELED => bun.C.E.CANCELED,
         UV_ECHARSET => bun.C.E.CHARSET,
-        UV_EOF => bun.C.E.OF,
+        UV_EOF => bun.C.E.EOF,
         else => @enumFromInt(-code),
     };
 }
@@ -2734,7 +2755,7 @@ pub const ReturnCode = enum(c_int) {
                 UV_EREMOTEIO => @intFromEnum(bun.C.E.REMOTEIO),
                 UV_ECANCELED => @intFromEnum(bun.C.E.CANCELED),
                 UV_ECHARSET => @intFromEnum(bun.C.E.CHARSET),
-                UV_EOF => @intFromEnum(bun.C.E.OF),
+                UV_EOF => @intFromEnum(bun.C.E.EOF),
                 else => null,
             }
         else
@@ -2939,7 +2960,7 @@ pub fn StreamWriterMixin(comptime Type: type, comptime pipe_field_name: std.meta
         }
 
         fn uv_on_write_cb(req: *uv_write_t, status: ReturnCode) callconv(.C) void {
-            var this: *Type = @fieldParentPtr(Type, @tagName(uv_write_t_field_name), req);
+            var this: *Type = @fieldParentPtr(@tagName(uv_write_t_field_name), req);
             this.onWrite(if (status.toError(.send)) |err| .{ .err = err } else .{ .result = @intCast(status.int()) });
         }
 

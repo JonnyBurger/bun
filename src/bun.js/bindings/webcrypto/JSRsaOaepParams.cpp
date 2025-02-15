@@ -30,7 +30,6 @@
 #include <JavaScriptCore/JSCInlines.h>
 #include <variant>
 
-
 namespace WebCore {
 using namespace JSC;
 
@@ -38,39 +37,39 @@ using namespace JSC;
 
 template<> CryptoAlgorithmRsaOaepParams convertDictionary<CryptoAlgorithmRsaOaepParams>(JSGlobalObject& lexicalGlobalObject, JSValue value)
 {
-    VM& vm = JSC::getVM(&lexicalGlobalObject);
+    auto& vm = JSC::getVM(&lexicalGlobalObject);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
     bool isNullOrUndefined = value.isUndefinedOrNull();
     auto* object = isNullOrUndefined ? nullptr : value.getObject();
     if (UNLIKELY(!isNullOrUndefined && !object)) {
         throwTypeError(&lexicalGlobalObject, throwScope);
-        return { };
+        return {};
     }
     CryptoAlgorithmRsaOaepParams result;
     JSValue nameValue;
     if (isNullOrUndefined)
         nameValue = jsUndefined();
     else {
-        nameValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "name"_s));
-        RETURN_IF_EXCEPTION(throwScope, { });
+        nameValue = object->get(&lexicalGlobalObject, vm.propertyNames->name);
+        RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!nameValue.isUndefined()) {
         result.name = convert<IDLDOMString>(lexicalGlobalObject, nameValue);
-        RETURN_IF_EXCEPTION(throwScope, { });
+        RETURN_IF_EXCEPTION(throwScope, {});
     } else {
-        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "name", "RsaOaepParams", "DOMString");
-        return { };
+        throwRequiredMemberTypeError(lexicalGlobalObject, throwScope, "name"_s, "RsaOaepParams"_s, "DOMString"_s);
+        return {};
     }
     JSValue labelValue;
     if (isNullOrUndefined)
         labelValue = jsUndefined();
     else {
         labelValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "label"_s));
-        RETURN_IF_EXCEPTION(throwScope, { });
+        RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!labelValue.isUndefined()) {
         result.label = convert<IDLUnion<IDLArrayBufferView, IDLArrayBuffer>>(lexicalGlobalObject, labelValue);
-        RETURN_IF_EXCEPTION(throwScope, { });
+        RETURN_IF_EXCEPTION(throwScope, {});
     }
     return result;
 }

@@ -1,4 +1,4 @@
-const Lock = @import("../lock.zig").Lock;
+const Lock = bun.Mutex;
 const std = @import("std");
 const MutableString = bun.MutableString;
 const getAllocator = @import("../http.zig").getAllocator;
@@ -17,7 +17,7 @@ pub fn get(allocator: std.mem.Allocator) *MutableString {
 
 pub fn put(mutable: *MutableString) void {
     mutable.reset();
-    var node = @fieldParentPtr(BufferPool.Node, "data", mutable);
+    var node: BufferPool.Node = @fieldParentPtr("data", mutable);
     node.release();
 }
 

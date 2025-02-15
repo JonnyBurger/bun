@@ -68,9 +68,7 @@ pub const KeepAlive = struct {
         if (this.status != .active)
             return;
         this.status = .inactive;
-
-        // TODO: https://github.com/oven-sh/bun/pull/4410#discussion_r1317326194
-        vm.event_loop_handle.?.dec();
+        vm.event_loop.unrefConcurrently();
     }
 
     /// Prevent a poll from keeping the process alive on the next tick.
@@ -109,8 +107,7 @@ pub const KeepAlive = struct {
         if (this.status != .inactive)
             return;
         this.status = .active;
-        // TODO: https://github.com/oven-sh/bun/pull/4410#discussion_r1317326194
-        vm.event_loop_handle.?.inc();
+        vm.event_loop.refConcurrently();
     }
 
     pub fn refConcurrentlyFromEventLoop(this: *KeepAlive, loop: *JSC.EventLoop) void {
@@ -319,9 +316,9 @@ pub const FilePoll = struct {
 
         const log = Output.scoped(.FilePoll, false);
 
-        pub fn init(allocator: std.mem.Allocator) Store {
+        pub fn init() Store {
             return .{
-                .hive = HiveArray.init(allocator),
+                .hive = HiveArray.init(bun.typedAllocator(FilePoll)),
             };
         }
 
@@ -361,8 +358,10 @@ pub const FilePoll = struct {
 
             poll.flags.insert(.ignore_updates);
             this.pending_free_tail = poll;
-            bun.assert(vm.after_event_loop_callback == null or vm.after_event_loop_callback == @as(?JSC.OpaqueCallback, @ptrCast(&processDeferredFrees)));
-            vm.after_event_loop_callback = @ptrCast(&processDeferredFrees);
+
+            const callback = JSC.OpaqueWrap(Store, processDeferredFrees);
+            bun.assert(vm.after_event_loop_callback == null or vm.after_event_loop_callback == @as(?JSC.OpaqueCallback, callback));
+            vm.after_event_loop_callback = callback;
             vm.after_event_loop_callback_ctx = this;
         }
     };
@@ -408,7 +407,7 @@ pub const Closer = struct {
     }
 
     fn onClose(req: *uv.fs_t) callconv(.C) void {
-        var closer = @fieldParentPtr(Closer, "io_request", req);
+        var closer: *Closer = @fieldParentPtr("io_request", req);
         bun.assert(closer == @as(*Closer, @alignCast(@ptrCast(req.data.?))));
         bun.sys.syslog("uv_fs_close({}) = {}", .{ bun.toFD(req.file.fd), req.result });
 

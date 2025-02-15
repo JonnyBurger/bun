@@ -202,7 +202,7 @@ pub const ShellSubprocess = struct {
                     .memfd, .path, .ignore => {
                         return Writable{ .ignore = {} };
                     },
-                    .capture => {
+                    .ipc, .capture => {
                         return Writable{ .ignore = {} };
                     },
                 }
@@ -240,7 +240,7 @@ pub const ShellSubprocess = struct {
                 .path, .ignore => {
                     return Writable{ .ignore = {} };
                 },
-                .capture => {
+                .ipc, .capture => {
                     return Writable{ .ignore = {} };
                 },
             }
@@ -269,7 +269,7 @@ pub const ShellSubprocess = struct {
         }
 
         pub fn finalize(this: *Writable) void {
-            const subprocess = @fieldParentPtr(Subprocess, "stdin", this);
+            const subprocess: *Subprocess = @fieldParentPtr("stdin", this);
             if (subprocess.this_jsvalue != .zero) {
                 if (JSC.Codegen.JSSubprocess.stdinGetCached(subprocess.this_jsvalue)) |existing_value| {
                     JSC.WebCore.FileSink.JSSink.setDestroyCallback(existing_value, 0);
@@ -375,7 +375,7 @@ pub const ShellSubprocess = struct {
             if (Environment.isWindows) {
                 return switch (stdio) {
                     .inherit => Readable{ .inherit = {} },
-                    .dup2, .ignore => Readable{ .ignore = {} },
+                    .ipc, .dup2, .ignore => Readable{ .ignore = {} },
                     .path => Readable{ .ignore = {} },
                     .fd => |fd| Readable{ .fd = fd },
                     // blobs are immutable, so we should only ever get the case
@@ -396,7 +396,7 @@ pub const ShellSubprocess = struct {
 
             return switch (stdio) {
                 .inherit => Readable{ .inherit = {} },
-                .dup2, .ignore => Readable{ .ignore = {} },
+                .ipc, .dup2, .ignore => Readable{ .ignore = {} },
                 .path => Readable{ .ignore = {} },
                 .fd => Readable{ .fd = result.? },
                 // blobs are immutable, so we should only ever get the case
@@ -491,22 +491,12 @@ pub const ShellSubprocess = struct {
     }
 
     /// This disables the keeping process alive flag on the poll and also in the stdin, stdout, and stderr
-    pub fn unref(this: *@This(), comptime deactivate_poll_ref: bool) void {
-        _ = deactivate_poll_ref; // autofix
-        // const vm = this.globalThis.bunVM();
-
+    pub fn unref(this: *@This(), comptime _: bool) void {
         this.process.disableKeepingEventLoopAlive();
-        // if (!this.hasCalledGetter(.stdin)) {
-        // this.stdin.unref();
-        // }
 
-        // if (!this.hasCalledGetter(.stdout)) {
         this.stdout.unref();
-        // }
 
-        // if (!this.hasCalledGetter(.stderr)) {
-        this.stdout.unref();
-        // }
+        this.stderr.unref();
     }
 
     pub fn hasKilled(this: *const @This()) bool {
@@ -521,7 +511,7 @@ pub const ShellSubprocess = struct {
         return this.process.kill(@intCast(sig));
     }
 
-    // fn hasCalledGetter(this: *Subprocess, comptime getter: @Type(.EnumLiteral)) bool {
+    // fn hasCalledGetter(this: *Subprocess, comptime getter: @Type(.enum_literal)) bool {
     //     return this.observable_getters.contains(getter);
     // }
 
@@ -538,7 +528,7 @@ pub const ShellSubprocess = struct {
         // this.ipc_mode = .none;
     }
 
-    pub fn closeIO(this: *@This(), comptime io: @Type(.EnumLiteral)) void {
+    pub fn closeIO(this: *@This(), comptime io: @Type(.enum_literal)) void {
         if (this.closed.contains(io)) return;
         log("close IO {s}", .{@tagName(io)});
         this.closed.insert(io);
@@ -714,7 +704,7 @@ pub const ShellSubprocess = struct {
         }
 
         pub fn fillEnvFromProcess(this: *SpawnArgs, globalThis: *JSGlobalObject) void {
-            var env_iter = EnvMapIter.init(globalThis.bunVM().bundler.env.map, this.arena.allocator());
+            var env_iter = EnvMapIter.init(globalThis.bunVM().transpiler.env.map, this.arena.allocator());
             return this.fillEnv(globalThis, &env_iter, false);
         }
 
@@ -792,7 +782,7 @@ pub const ShellSubprocess = struct {
         const is_sync = config.is_sync;
 
         if (!spawn_args.override_env and spawn_args.env_array.items.len == 0) {
-            // spawn_args.env_array.items = jsc_vm.bundler.env.map.createNullDelimitedEnvMap(allocator) catch bun.outOfMemory();
+            // spawn_args.env_array.items = jsc_vm.transpiler.env.map.createNullDelimitedEnvMap(allocator) catch bun.outOfMemory();
             spawn_args.env_array.items = event_loop.createNullDelimitedEnvMap(allocator) catch bun.outOfMemory();
             spawn_args.env_array.capacity = spawn_args.env_array.items.len;
         }
@@ -840,7 +830,7 @@ pub const ShellSubprocess = struct {
             .windows = if (Environment.isWindows) bun.spawn.WindowsSpawnOptions.WindowsOptions{
                 .hide_window = true,
                 .loop = event_loop,
-            } else {},
+            },
         };
 
         spawn_args.argv.append(allocator, null) catch {
@@ -858,7 +848,7 @@ pub const ShellSubprocess = struct {
         ) catch |err| {
             return .{ .err = .{ .custom = std.fmt.allocPrint(bun.default_allocator, "Failed to spawn process: {s}", .{@errorName(err)}) catch bun.outOfMemory() } };
         }) {
-            .err => |err| return .{ .err = .{ .sys = err.toSystemError() } },
+            .err => |err| return .{ .err = .{ .sys = err.toShellSystemError() } },
             .result => |result| result,
         };
 
@@ -964,8 +954,6 @@ pub const ShellSubprocess = struct {
             }
         }
     }
-
-    const os = std.os;
 };
 
 const WaiterThread = bun.spawn.WaiterThread;
@@ -1032,7 +1020,7 @@ pub const PipeReader = struct {
         }
     };
 
-    pub usingnamespace bun.NewRefCounted(PipeReader, deinit);
+    pub usingnamespace bun.NewRefCounted(PipeReader, deinit, null);
 
     pub const CapturedWriter = struct {
         dead: bool = true,
@@ -1058,7 +1046,7 @@ pub const PipeReader = struct {
         }
 
         pub fn parent(this: *CapturedWriter) *PipeReader {
-            return @fieldParentPtr(PipeReader, "captured_writer", this);
+            return @fieldParentPtr("captured_writer", this);
         }
 
         pub fn eventLoop(this: *CapturedWriter) JSC.EventLoopHandle {
